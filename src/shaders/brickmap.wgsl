@@ -7,7 +7,9 @@
 // Pipelines must set the BRICK_BITS override (config.world.brickBits).
 //
 // Pointer encoding (see src/gpu/brick-pack.ts):
-//   0                          empty brick (all air) — skip it in one step
+//   0                          empty brick (all air), no skip information
+//   BRICK_EMPTY_FLAG | d       empty brick; d (bits 0-7) = Chebyshev distance in bricks to
+//                              the nearest non-empty brick (brick-distance.wgsl)
 //   BRICK_UNIFORM_FLAG | id    every voxel is block `id`, no pool storage
 //   otherwise                  pool slot of a mixed brick
 
@@ -15,7 +17,9 @@ override BRICK_BITS: u32 = 3u;
 
 const BRICK_EMPTY: u32 = 0u;
 const BRICK_UNIFORM_FLAG: u32 = 0x80000000u;
+const BRICK_EMPTY_FLAG: u32 = 0x40000000u;
 const BRICK_UNIFORM_ID_MASK: u32 = 0xffffu;
+const BRICK_DISTANCE_MASK: u32 = 0xffu;
 
 struct BrickmapParams {
   /// Minimum corner of the resident window, in brick coordinates.
@@ -25,6 +29,12 @@ struct BrickmapParams {
   size: vec3u,
   /// Brick Y of the grid's bottom layer.
   min_brick_y: i32,
+  /// Box around every non-empty brick (brick coords, max exclusive); min == max if empty.
+  /// Its top is the highest occupied layer, so rays above the terrain stop at once.
+  bounds_min: vec3i,
+  _pad1: i32,
+  bounds_max: vec3i,
+  _pad2: i32,
 };
 
 @group(1) @binding(0) var<uniform> brickmap: BrickmapParams;
@@ -35,8 +45,15 @@ fn brickSize() -> i32 {
   return 1 << BRICK_BITS;
 }
 
-fn brickWords() -> u32 {
+/// u32 words of voxel data per pool slot (8-bit voxels, 4 per word).
+fn brickVoxelWords() -> u32 {
   return (1u << (3u * BRICK_BITS)) / 4u;
+}
+
+/// Words per pool slot: voxels, then a 64-bit occupancy mask of the 4×4×4 sub-cells
+/// (bit ((y·4 + z)·4 + x) set = sub-cell holds a solid voxel).
+fn brickStride() -> u32 {
+  return brickVoxelWords() + 2u;
 }
 
 /// Brick containing voxel `p` (arithmetic shift floors negative coordinates).
@@ -60,21 +77,33 @@ fn brickPointer(b: vec3i) -> u32 {
   return brick_grid[cell];
 }
 
+fn brickIsEmpty(ptr: u32) -> bool {
+  return ptr == BRICK_EMPTY || (ptr & BRICK_EMPTY_FLAG) != 0u;
+}
+
+/// Pointer of brick `b` known to lie inside the resident window (the tracer only visits
+/// bricks inside the occupied box, which the window contains). Skips the X/Z window test.
+fn brickPointerInBox(b: vec3i) -> u32 {
+  let s = brickmap.size;
+  let y = u32(clamp(b.y - brickmap.min_brick_y, 0, i32(s.y) - 1));
+  return brick_grid[(y * s.z + (u32(b.z) & (s.z - 1u))) * s.x + (u32(b.x) & (s.x - 1u))];
+}
+
 /// Occupancy query: false means the whole brick is air and a ray can skip it.
 fn brickOccupied(b: vec3i) -> bool {
-  return brickPointer(b) != BRICK_EMPTY;
+  return !brickIsEmpty(brickPointer(b));
 }
 
 /// Block id at `local` (0..brickSize-1 per axis) inside the brick behind `ptr`.
 fn brickVoxel(ptr: u32, local: vec3u) -> u32 {
-  if (ptr == BRICK_EMPTY) {
+  if (brickIsEmpty(ptr)) {
     return 0u;
   }
   if ((ptr & BRICK_UNIFORM_FLAG) != 0u) {
     return ptr & BRICK_UNIFORM_ID_MASK;
   }
   let i = (local.y << (2u * BRICK_BITS)) | (local.z << BRICK_BITS) | local.x;
-  let word = brick_pool[ptr * brickWords() + (i >> 2u)];
+  let word = brick_pool[ptr * brickStride() + (i >> 2u)];
   return (word >> ((i & 3u) * 8u)) & 0xffu;
 }
 

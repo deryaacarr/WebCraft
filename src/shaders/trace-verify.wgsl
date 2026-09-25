@@ -29,6 +29,6 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     return;
   }
   let ray = rays[id.x];
-  let r = traceRay(ray.cell, ray.frac, ray.dir, ray.max_t, MAX_STEPS);
+  let r = traceRay(ray.cell, ray.frac, ray.dir, 0.0, ray.max_t, MAX_STEPS);
   results[id.x] = RayOut(r.cell, select(0u, 1u, r.hit), r.normal, r.id);
 }

@@ -40,6 +40,10 @@ export interface DebugOverlayHooks {
   /** Compares GPU traceRay() with the CPU voxel raycast. */
   onVerifyTrace(): Promise<TraceVerifyResult>;
   cameraInfo(): { position: Vec3; internal: { width: number; height: number } };
+  /** Times the primary pass alone, back to back. */
+  onBenchmarkPrimary(): Promise<{ gpuMs: number | null; wallMs: number; avgSteps: number; p95Steps: number }>;
+  /** Compares the G-buffer rendered with and without the depth prepass. */
+  onVerifyPrepass(): Promise<{ pixels: number; mismatches: number; first?: string }>;
 }
 
 /**
@@ -218,7 +222,7 @@ export class DebugOverlay {
     this.brickValues.dropped = b.droppedBricks;
   }
 
-  private readonly cameraValues = { position: '', internal: '', verify: '–' };
+  private readonly cameraValues = { position: '', internal: '', verify: '–', benchmark: '–', prepass: '–' };
 
   private buildCameraControls(hooks: DebugOverlayHooks): void {
     const v = this.cameraValues;
@@ -228,6 +232,7 @@ export class DebugOverlay {
     f.add(config.camera, 'far', 32, 2048, 16).name('far (blocks)');
     f.add(config.camera, 'jitter').name('jitter (Halton 2,3)');
     f.add(config.trace, 'maxSteps', 16, 4096, 1).name('max DDA steps');
+    f.add(config.trace, 'prepass').name('depth prepass');
     f.add(v, 'position').name('position').disable().listen();
     f.add(v, 'internal').name('traced resolution').disable().listen();
     f.add(v, 'verify').name('verify result').disable().listen();
@@ -246,6 +251,40 @@ export class DebugOverlay {
       },
     };
     f.add(actions, 'verify').name('Verify rays (GPU vs CPU)');
+    f.add(v, 'benchmark').name('primary benchmark').disable().listen();
+    const bench = {
+      run: () => {
+        v.benchmark = 'running…';
+        hooks.onBenchmarkPrimary().then(
+          (r) => {
+            v.benchmark =
+              `${r.gpuMs?.toFixed(2) ?? 'n/a'} ms gpu, ${r.wallMs.toFixed(2)} ms wall, ` +
+              `steps avg ${r.avgSteps.toFixed(1)} p95 ${r.p95Steps}`;
+            console.info('[benchmark] primary pass:', r);
+          },
+          (err: unknown) => {
+            v.benchmark = `error: ${err instanceof Error ? err.message : String(err)}`;
+          },
+        );
+      },
+    };
+    f.add(bench, 'run').name(`Benchmark primary (×${config.debug.benchmarkIterations})`);
+    f.add(v, 'prepass').name('prepass verify').disable().listen();
+    const prepass = {
+      run: () => {
+        v.prepass = 'running…';
+        hooks.onVerifyPrepass().then(
+          (r) => {
+            v.prepass = `${r.pixels - r.mismatches}/${r.pixels} identical`;
+            (r.mismatches === 0 ? console.info : console.warn)('[prepass] verify:', r);
+          },
+          (err: unknown) => {
+            v.prepass = `error: ${err instanceof Error ? err.message : String(err)}`;
+          },
+        );
+      },
+    };
+    f.add(prepass, 'run').name('Verify prepass (with vs without)');
   }
 
   private buildBrickmapControls(hooks: DebugOverlayHooks): void {

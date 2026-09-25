@@ -1,6 +1,7 @@
 import { config } from './config';
 import { Input } from './core/input';
 import type { Vec3 } from './core/math';
+import { parseUrlOverrides } from './core/url-params';
 import { GameLoop } from './core/loop';
 import { initGpu, WebGPUUnsupportedError } from './gpu/device';
 import { GpuBrickmap } from './gpu/brickmap';
@@ -19,9 +20,17 @@ async function main(): Promise<void> {
   const canvas = document.querySelector<HTMLCanvasElement>('#canvas');
   if (!canvas) throw new Error('#canvas bulunamadı');
 
+  const overrides = parseUrlOverrides(location.search);
+  if (overrides.view) config.debug.view = overrides.view;
+  if (overrides.renderScale) config.render.renderScale = overrides.renderScale;
+  if (overrides.workgroup) config.trace.workgroup = overrides.workgroup;
+  if (overrides.prepassTile) config.trace.prepassTile = overrides.prepassTile;
+  if (overrides.distanceMax) config.trace.distanceMax = overrides.distanceMax;
+
   const gpu = await initGpu(canvas);
 
   const brickmap = new GpuBrickmap(gpu.device);
+  await brickmap.init();
   const renderer = new Renderer(gpu, canvas, brickmap);
   await renderer.init();
 
@@ -41,7 +50,8 @@ async function main(): Promise<void> {
       config.camera.spawnHeight,
     0.5,
   ];
-  let camera = new FlyCamera(spawn());
+  const pose = overrides.camera;
+  let camera = pose ? new FlyCamera(pose.position, pose.pitchDeg, pose.yawDeg) : new FlyCamera(spawn());
 
   const regenerate = () => {
     streamer.reset();
@@ -58,6 +68,8 @@ async function main(): Promise<void> {
     onVerifyBrickmap: () => verifyBrickmap(gpu.device, brickmap, world),
     onVerifyTrace: () => verifyTrace(gpu.device, brickmap, world, camera.position),
     cameraInfo: () => ({ position: camera.position, internal: renderer.internalSize }),
+    onBenchmarkPrimary: () => renderer.benchmarkPrimary(config.debug.benchmarkIterations),
+    onVerifyPrepass: () => renderer.verifyPrepass(),
     worldStats: () => {
       let dense = 0;
       let chunkBytes = 0;

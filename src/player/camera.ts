@@ -47,11 +47,13 @@ export class FlyCamera {
   private frameIndex = 0;
   private lastFrame: { viewProj: Mat4; position: Vec3 } | null = null;
 
-  constructor(position: Vec3, pitchDeg = -20) {
+  constructor(position: Vec3, pitchDeg = -20, yawDeg = 0) {
     this.position = [...position];
     this.prevPosition = [...position];
     this.pitch = pitchDeg * DEG;
     this.prevPitch = this.pitch;
+    this.yaw = yawDeg * DEG;
+    this.prevYaw = this.yaw;
   }
 
   /** Fixed-step update. */

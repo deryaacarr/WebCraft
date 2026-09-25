@@ -1,27 +1,10 @@
 // Primary rays: one per pixel from the camera into the brickmap, results to the G-buffer.
 #include "trace.wgsl"
 #include "gbuffer.wgsl"
+#include "camera.wgsl"
 
-struct Camera {
-  /// Rotation-only (camera at the origin), jittered: ray generation.
-  inv_view_proj: mat4x4f,
-  /// Rotation-only, unjittered, this and the previous frame: motion vectors.
-  view_proj: mat4x4f,
-  prev_view_proj: mat4x4f,
-  origin_cell: vec3i,
-  max_steps: u32,
-  origin_frac: vec3f,
-  far: f32,
-  /// Camera position now − previous frame (world units).
-  prev_delta: vec3f,
-  _pad0: f32,
-  forward: vec3f,
-  _pad1: f32,
-  size: vec2u,
-  _pad2: vec2u,
-};
-
-override WORKGROUP_SIZE: u32 = 8u;
+override WORKGROUP_X: u32 = 8u;
+override WORKGROUP_Y: u32 = 8u;
 
 @group(0) @binding(0) var<uniform> cam: Camera;
 @group(0) @binding(1) var gbuffer0: texture_storage_2d<rgba32uint, write>;
@@ -31,24 +14,28 @@ override WORKGROUP_SIZE: u32 = 8u;
 @group(0) @binding(4) var<storage, read> block_faces: array<vec4u>;
 /// Per material: linear albedo in xyz.
 @group(0) @binding(5) var<storage, read> material_albedo: array<vec4f>;
+/// Depth prepass: per tile, the distance before which no ray of the tile hits anything.
+@group(0) @binding(6) var coarse: texture_2d<f32>;
 
 fn clipToUv(clip: vec4f) -> vec2f {
   let ndc = clip.xy / clip.w;
   return vec2f(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
 }
 
-@compute @workgroup_size(WORKGROUP_SIZE, WORKGROUP_SIZE, 1)
+@compute @workgroup_size(WORKGROUP_X, WORKGROUP_Y, 1)
 fn main(@builtin(global_invocation_id) gid: vec3u) {
   if (any(gid.xy >= cam.size)) {
     return;
   }
   let px = vec2i(gid.xy);
   let uv = (vec2f(gid.xy) + 0.5) / vec2f(cam.size);
-  // Any point on the ray through the pixel; the camera sits at the origin of this space.
-  let h = cam.inv_view_proj * vec4f(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 1.0, 1.0);
-  let dir = normalize(h.xyz / h.w);
+  let dir = rayDir(cam.inv_view_proj, uv);
+  var t_min = 0.0;
+  if (cam.prepass_tile > 0u) {
+    t_min = textureLoad(coarse, vec2i(gid.xy / cam.prepass_tile), 0).x;
+  }
 
-  let r = traceRay(cam.origin_cell, cam.origin_frac, dir, cam.far, cam.max_steps);
+  let r = traceRay(cam.origin_cell, cam.origin_frac, dir, t_min, cam.far, cam.max_steps);
 
   if (!r.hit) {
     // Sky: reproject the direction only (infinitely far, camera translation irrelevant).

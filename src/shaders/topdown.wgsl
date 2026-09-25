@@ -50,7 +50,7 @@ fn scanDown(x: i32, z: i32, from_y: i32) -> Hit {
       break;
     }
     let ptr = brickPointer(vec3i(bx, by, bz));
-    if (ptr != BRICK_EMPTY) {
+    if (!brickIsEmpty(ptr)) {
       for (var y = ly; y >= 0; y--) {
         let id = brickVoxel(ptr, vec3u(lx, u32(y), lz));
         if (id != 0u) {

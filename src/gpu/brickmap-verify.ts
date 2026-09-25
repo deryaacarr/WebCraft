@@ -19,7 +19,8 @@ export interface VerifyResult {
  */
 export async function verifyBrickmap(device: GPUDevice, brickmap: GpuBrickmap, world: World): Promise<VerifyResult> {
   const start = performance.now();
-  brickmap.store.flush(world); // GPU must be up to date for a fair comparison
+  brickmap.store.flush(world);
+  brickmap.flushDistance(); // GPU must be up to date for a fair comparison
 
   const chunks = [...world.chunkValues()];
   if (chunks.length === 0) throw new Error('no chunks loaded');

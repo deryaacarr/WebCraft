@@ -4,7 +4,8 @@ import type { GpuProfiler } from '../profiler';
 /** Per-frame data shared by every pass. */
 export interface FrameContext {
   encoder: GPUCommandEncoder;
-  profiler: GpuProfiler;
+  /** Only timestamp allocation is needed by passes (lets benchmarks substitute their own). */
+  profiler: Pick<GpuProfiler, 'timestampWrites'>;
   /** Seconds since start, interpolated to the render moment. */
   time: number;
   camera: CameraFrame;

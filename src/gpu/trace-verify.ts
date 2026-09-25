@@ -4,6 +4,7 @@ import { raycast } from '../world/raycast';
 import type { World } from '../world/world';
 import type { GpuBrickmap } from './brickmap';
 import { createShaderModule } from './shader';
+import { traceConstants } from './trace-constants';
 
 export interface TraceVerifyResult {
   rays: number;
@@ -25,6 +26,7 @@ const RAY_OUT_WORDS = 8;
 export async function verifyTrace(device: GPUDevice, brickmap: GpuBrickmap, world: World, origin: Vec3): Promise<TraceVerifyResult> {
   const start = performance.now();
   brickmap.store.flush(world);
+  brickmap.flushDistance();
 
   const n = config.trace.verifySamples;
   const maxT = config.trace.verifyMaxDistance;
@@ -65,7 +67,7 @@ export async function verifyTrace(device: GPUDevice, brickmap: GpuBrickmap, worl
     compute: {
       module,
       entryPoint: 'main',
-      constants: { WORKGROUP_SIZE: workgroup, BRICK_BITS: config.world.brickBits, MAX_STEPS: config.trace.verifyMaxSteps },
+      constants: { WORKGROUP_SIZE: workgroup, MAX_STEPS: config.trace.verifyMaxSteps, ...traceConstants() },
     },
   });
   const outBytes = n * RAY_OUT_WORDS * 4;

@@ -167,6 +167,22 @@ export const config = {
   trace: {
     /** Upper bound on DDA iterations (brick steps + voxel steps) per primary ray. */
     maxSteps: 512,
+    /** Workgroup [x, y] of the primary ray and prepass shaders. Structural (reload). */
+    workgroup: [8, 8] as [number, number],
+    /** Depth prepass: trace one conservative cone per tile first; full rays start there. */
+    prepass: true,
+    /** Depth prepass tile edge in pixels (the prepass runs at 1/tile resolution). */
+    prepassTile: 8,
+    /** Distance (blocks) subtracted from the prepass result before the full rays use it. */
+    prepassSafety: 0.5,
+    /** Safety factor on the tile's cone radius. */
+    prepassConeMargin: 1.1,
+    /** Iteration cap for a prepass cone. */
+    prepassMaxSteps: 256,
+    /** Distance field: largest stored distance in bricks (cost per update ∝ 2·max + 1). */
+    distanceMax: 8,
+    /** Distance field passes: workgroup edge (cubic). */
+    distanceWorkgroup: 4,
     /** Rays checked by the "verify rays" debug tool. */
     verifySamples: 4096,
     /** Ray length for the verify tool (inside the resident window). */
@@ -189,6 +205,8 @@ export const config = {
     motionScale: 20,
     /** Depth view: depth (blocks) at which the grey ramp reaches 50 %. */
     depthHalf: 64,
+    /** Back-to-back primary passes timed by "Benchmark primary". */
+    benchmarkIterations: 50,
     /** Key that toggles the debug overlay. */
     toggleKey: 'F3',
     /** Show the overlay on start. */

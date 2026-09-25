@@ -3,7 +3,9 @@ import { BRICK_SIZE, BRICKS_PER_AXIS, BRICKS_PER_CHUNK, parseChunkKey } from '..
 import type { World, WorldChanges } from '../world/world';
 import {
   BRICK_BYTES,
-  BRICK_WORDS,
+  BRICK_OCCUPANCY_WORDS,
+  BRICK_STRIDE_WORDS,
+  BRICK_VOXEL_WORDS,
   EMPTY_BRICK,
   isSlot,
   MIXED,
@@ -15,12 +17,27 @@ import {
 export interface BrickSink {
   /** Writes `pointers` into consecutive grid cells starting at `cell`. */
   writeGrid(cell: number, pointers: Uint32Array): void;
-  /** Writes whole bricks (BRICK_WORDS each) into consecutive pool slots starting at `slot`. */
+  /** Writes whole bricks (BRICK_STRIDE_WORDS each) into consecutive pool slots from `slot`. */
   writePool(slot: number, words: Uint32Array): void;
   /** Grows the pool to `capacity` slots, preserving contents. */
   growPool(capacity: number): void;
   /** The brick window moved; `origin` is its minimum corner in brick coordinates. */
   setOrigin(origin: readonly [number, number, number]): void;
+  /**
+   * Box (brick coordinates, max exclusive) that contains every non-empty brick; rays are
+   * clipped to it. An empty world is reported as min = max.
+   */
+  setBounds(min: readonly [number, number, number], max: readonly [number, number, number]): void;
+}
+
+interface ResidentChunk {
+  cx: number;
+  cy: number;
+  cz: number;
+  /** Pointers of its bricks (mirror of its grid cells). */
+  pointers: Uint32Array;
+  /** Number of non-empty bricks. */
+  occupied: number;
 }
 
 export interface BrickGridSize {
@@ -63,8 +80,11 @@ export interface BrickStoreStats {
 export class BrickStore {
   private readonly grid: Uint32Array;
   private readonly size: BrickGridSize;
-  /** Pointers per resident chunk key (mirror of its cells, for eviction/replacement). */
-  private readonly resident = new Map<string, Uint32Array>();
+  private readonly resident = new Map<string, ResidentChunk>();
+  /** Non-empty bricks per grid layer (Y): gives the lowest / highest occupied layer. */
+  private readonly layerCounts: Int32Array;
+  private boundsDirty = true;
+  private lastBounds = '';
   /** Chunks waiting for upload, with the bricks to (re)build. Insertion order = priority. */
   private readonly pending = new Map<string, Uint8Array>();
   private readonly free: number[] = [];
@@ -73,6 +93,7 @@ export class BrickStore {
   private origin: [number, number, number] | null = null;
   private readonly staging: Uint8Array;
   private readonly stagingWords: Uint32Array;
+  private readonly stagingMasks = new Uint32Array(BRICKS_PER_CHUNK * BRICK_OCCUPANCY_WORDS);
   private readonly rowPointers = new Uint32Array(BRICKS_PER_AXIS);
   private mixed = 0;
   private uniform = 0;
@@ -91,6 +112,7 @@ export class BrickStore {
     }
     this.size = grid;
     this.grid = new Uint32Array(grid.x * grid.y * grid.z);
+    this.layerCounts = new Int32Array(grid.y);
     this.capacity = Math.max(2, opts.initialPoolBricks + 1);
     this.staging = new Uint8Array(BRICKS_PER_CHUNK * BRICK_BYTES);
     this.stagingWords = new Uint32Array(this.staging.buffer);
@@ -144,6 +166,7 @@ export class BrickStore {
       }
     }
     this.sink.setOrigin(origin);
+    this.publishBounds();
     return true;
   }
 
@@ -162,6 +185,7 @@ export class BrickStore {
         this.pending.set(chunk.key, bricks.slice());
       }
     }
+    this.publishBounds();
   }
 
   /** Uploads pending chunks until `budgetMs` is spent (at least one chunk per call). */
@@ -174,6 +198,33 @@ export class BrickStore {
       if (chunk) this.upload(chunk, bricks);
       if (now() - start >= budgetMs) break;
     }
+    this.publishBounds();
+  }
+
+  /** Current ray-clipping box in brick coordinates (max exclusive); null when empty. */
+  get bounds(): { min: [number, number, number]; max: [number, number, number] } | null {
+    let minX = Infinity;
+    let minZ = Infinity;
+    let maxX = -Infinity;
+    let maxZ = -Infinity;
+    for (const c of this.resident.values()) {
+      if (c.occupied === 0) continue;
+      minX = Math.min(minX, c.cx);
+      maxX = Math.max(maxX, c.cx);
+      minZ = Math.min(minZ, c.cz);
+      maxZ = Math.max(maxZ, c.cz);
+    }
+    const layers = this.layerCounts;
+    let lo = 0;
+    while (lo < layers.length && layers[lo] === 0) lo++;
+    let hi = layers.length - 1;
+    while (hi >= 0 && layers[hi] === 0) hi--;
+    if (minX === Infinity || lo > hi) return null;
+    const P = BRICKS_PER_AXIS;
+    return {
+      min: [minX * P, this.size.minBrickY + lo, minZ * P],
+      max: [(maxX + 1) * P, this.size.minBrickY + hi + 1, (maxZ + 1) * P],
+    };
   }
 
   /** Uploads everything pending, regardless of time (tests, tools). */
@@ -203,13 +254,26 @@ export class BrickStore {
     return (y * this.size.z + (bz & (this.size.z - 1))) * this.size.x + (bx & (this.size.x - 1));
   }
 
+  private publishBounds(): void {
+    if (!this.boundsDirty) return;
+    this.boundsDirty = false;
+    const b = this.bounds;
+    const min = b?.min ?? ([0, 0, 0] as [number, number, number]);
+    const max = b?.max ?? ([0, 0, 0] as [number, number, number]);
+    const key = `${min},${max}`;
+    if (key === this.lastBounds) return;
+    this.lastBounds = key;
+    this.sink.setBounds(min, max);
+  }
+
   private upload(chunk: Chunk, bricks: Uint8Array): void {
     const key = chunk.key;
-    let pointers = this.resident.get(key);
-    if (!pointers) {
-      pointers = new Uint32Array(BRICKS_PER_CHUNK);
-      this.resident.set(key, pointers);
+    let res = this.resident.get(key);
+    if (!res) {
+      res = { cx: chunk.cx, cy: chunk.cy, cz: chunk.cz, pointers: new Uint32Array(BRICKS_PER_CHUNK), occupied: 0 };
+      this.resident.set(key, res);
     }
+    const pointers = res.pointers;
 
     // 1. Classify bricks, pack mixed ones into staging, (re)assign slots.
     const writes: number[] = []; // [slot, stagingIndex] pairs
@@ -219,7 +283,7 @@ export class BrickStore {
       const old = pointers[b]!;
       // Bricks above/below the grid (chunk straddling a world bound) have no cell.
       const gy = byBase + Math.floor(b / (BRICKS_PER_AXIS * BRICKS_PER_AXIS));
-      const result = gy < 0 || gy >= this.size.y ? 0 : packBrick(chunk, b, this.staging, b * BRICK_BYTES);
+      const result = gy < 0 || gy >= this.size.y ? 0 : packBrick(chunk, b, this.staging, b * BRICK_BYTES, this.stagingMasks, b * BRICK_OCCUPANCY_WORDS);
       let next: number;
       if (result === MIXED) {
         const slot = isSlot(old) ? old : this.allocSlot();
@@ -234,8 +298,8 @@ export class BrickStore {
         if (isSlot(old)) this.freeSlot(old);
         next = uniformPointer(result);
       }
-      this.count(old, -1);
-      this.count(next, +1);
+      this.count(res, old, gy, -1);
+      this.count(res, next, gy, +1);
       pointers[b] = next;
     }
 
@@ -244,10 +308,12 @@ export class BrickStore {
       const slot = writes[i]!;
       let run = 1;
       while (i + run * 2 < writes.length && writes[i + run * 2] === slot + run) run++;
-      const words = new Uint32Array(run * BRICK_WORDS);
+      const words = new Uint32Array(run * BRICK_STRIDE_WORDS);
       for (let r = 0; r < run; r++) {
         const b = writes[i + r * 2 + 1]!;
-        words.set(this.stagingWords.subarray(b * BRICK_WORDS, (b + 1) * BRICK_WORDS), r * BRICK_WORDS);
+        const at = r * BRICK_STRIDE_WORDS;
+        words.set(this.stagingWords.subarray(b * BRICK_VOXEL_WORDS, (b + 1) * BRICK_VOXEL_WORDS), at);
+        words.set(this.stagingMasks.subarray(b * BRICK_OCCUPANCY_WORDS, (b + 1) * BRICK_OCCUPANCY_WORDS), at + BRICK_VOXEL_WORDS);
       }
       this.sink.writePool(slot, words);
       this.uploaded += words.byteLength;
@@ -258,6 +324,7 @@ export class BrickStore {
     this.writeRows(chunk.cx, chunk.cy, chunk.cz, pointers, bricks);
   }
 
+  /** Writes the chunk's grid rows (only rows with a flagged brick unless `bricks` is null). */
   private writeRows(cx: number, cy: number, cz: number, pointers: Uint32Array, bricks: Uint8Array | null): void {
     const P = BRICKS_PER_AXIS;
     const bx0 = cx * P;
@@ -279,17 +346,18 @@ export class BrickStore {
   }
 
   private evict(key: string): void {
-    const pointers = this.resident.get(key);
-    if (!pointers) return;
+    const res = this.resident.get(key);
+    if (!res) return;
     this.resident.delete(key);
+    const { pointers } = res;
+    const byBase = res.cy * BRICKS_PER_AXIS - this.size.minBrickY;
     for (let b = 0; b < BRICKS_PER_CHUNK; b++) {
       const p = pointers[b]!;
       if (isSlot(p)) this.freeSlot(p);
-      this.count(p, -1);
+      this.count(res, p, byBase + Math.floor(b / (BRICKS_PER_AXIS * BRICKS_PER_AXIS)), -1);
       pointers[b] = EMPTY_BRICK;
     }
-    const [cx, cy, cz] = parseChunkKey(key);
-    this.writeRows(cx, cy, cz, pointers, null);
+    this.writeRows(res.cx, res.cy, res.cz, pointers, null);
   }
 
   private allocSlot(): number {
@@ -308,9 +376,13 @@ export class BrickStore {
     this.free.push(slot);
   }
 
-  private count(pointer: number, delta: number): void {
+  private count(res: ResidentChunk, pointer: number, gy: number, delta: number): void {
+    if (pointer === EMPTY_BRICK) return;
     if (isSlot(pointer)) this.mixed += delta;
-    else if (pointer !== EMPTY_BRICK) this.uniform += delta;
+    else this.uniform += delta;
+    res.occupied += delta;
+    this.layerCounts[gy]! += delta;
+    this.boundsDirty = true;
   }
 }
 

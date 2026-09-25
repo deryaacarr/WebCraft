@@ -1,0 +1,16 @@
+import { describe, expect, it } from 'vitest';
+import { parseUrlOverrides } from './url-params';
+
+describe('parseUrlOverrides', () => {
+  it('parses camera pose, view and scale', () => {
+    expect(parseUrlOverrides('?cam=1,2.5,-3,90,-20&view=steps&scale=0.75')).toEqual({
+      camera: { position: [1, 2.5, -3], yawDeg: 90, pitchDeg: -20 },
+      view: 'steps',
+      renderScale: 0.75,
+    });
+  });
+
+  it('ignores malformed values', () => {
+    expect(parseUrlOverrides('?cam=1,2,x,4,5&view=nope&scale=-1')).toEqual({});
+  });
+});

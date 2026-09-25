@@ -27,7 +27,8 @@ export class GBuffer {
         label,
         size: { width, height },
         format,
-        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+        // COPY_SRC: debug tools read the G-buffer back.
+        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
       });
     this.gbuffer0 = make('gbuffer0', 'rgba32uint');
     this.depth = make('gbuffer-depth', 'r32float');
