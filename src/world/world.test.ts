@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { config } from '../config';
 import { BlockId } from './blocks';
 import { Chunk } from './chunk';
-import { CHUNK_SIZE } from './coords';
+import { BRICK_SIZE, BRICKS_PER_CHUNK, brickIndexInChunk, CHUNK_SIZE } from './coords';
 import { World } from './world';
 
 const S = CHUNK_SIZE;
@@ -10,7 +10,7 @@ const S = CHUNK_SIZE;
 function worldWith(...coords: [number, number, number][]): World {
   const w = new World();
   for (const [x, y, z] of coords) w.addChunk(new Chunk(x, y, z));
-  w.takeDirty();
+  w.takeChanges();
   return w;
 }
 
@@ -45,37 +45,74 @@ describe('World', () => {
     expect(w.setBlock(100, 100, 100, BlockId.stone)).toBe(false);
   });
 
-  it('tracks dirty chunks and clears them on takeDirty', () => {
+  it('tracks changes per brick and clears them on takeChanges', () => {
     const w = worldWith([0, 0, 0], [1, 0, 0]);
     w.setBlock(10, 10, 10, BlockId.stone);
+    w.setBlock(11, 10, 10, BlockId.dirt); // same brick
     expect(w.isDirty(0, 0, 0)).toBe(true);
     expect(w.isDirty(1, 0, 0)).toBe(false);
-    expect(w.takeDirty().map((c) => c.key)).toEqual(['0,0,0']);
-    expect(w.takeDirty()).toEqual([]);
+    const { changed, removed } = w.takeChanges();
+    expect(removed).toEqual([]);
+    expect(changed.map((c) => c.chunk.key)).toEqual(['0,0,0']);
+    const flagged = [...changed[0]!.bricks.keys()].filter((i) => changed[0]!.bricks[i]);
+    expect(flagged).toEqual([brickIndexInChunk(10, 10, 10)]);
+    expect(w.takeChanges()).toEqual({ changed: [], removed: [] });
   });
 
-  it('dirties the neighbour when editing a border block', () => {
-    const w = worldWith([0, 0, 0], [1, 0, 0], [-1, 0, 0]);
+  it('marks every brick of an added chunk as changed', () => {
+    const w = new World();
+    w.addChunk(new Chunk(0, 0, 0));
+    const [change] = w.takeChanges().changed;
+    expect(change?.bricks.length).toBe(BRICKS_PER_CHUNK);
+    expect(change?.bricks.every((b) => b === 1)).toBe(true);
+  });
+
+  it('does not dirty the neighbour on a border edit (the ray tracer reads it directly)', () => {
+    const w = worldWith([0, 0, 0], [1, 0, 0]);
     w.setBlock(S - 1, 0, 5, BlockId.stone);
-    expect(w.isDirty(1, 0, 0)).toBe(true);
-    expect(w.isDirty(-1, 0, 0)).toBe(false);
+    expect(w.isDirty(1, 0, 0)).toBe(false);
+    expect(w.takeChanges().changed).toHaveLength(1);
   });
 
-  it('does not dirty anything for a no-op write', () => {
+  it('flags the right bricks at brick borders', () => {
+    const w = worldWith([0, 0, 0]);
+    w.setBlock(BRICK_SIZE - 1, 0, 0, BlockId.stone);
+    w.setBlock(BRICK_SIZE, 0, 0, BlockId.stone);
+    const bricks = w.takeChanges().changed[0]!.bricks;
+    expect(bricks[0]).toBe(1);
+    expect(bricks[1]).toBe(1);
+    expect(bricks.reduce((a, b) => a + b, 0)).toBe(2);
+  });
+
+  it('does not report anything for a no-op write', () => {
     const w = worldWith([0, 0, 0]);
     expect(w.setBlock(1, 1, 1, BlockId.air)).toBe(false);
-    expect(w.takeDirty()).toEqual([]);
+    expect(w.takeChanges().changed).toEqual([]);
   });
 
-  it('dirties neighbours on add/remove and forgets removed chunks', () => {
-    const w = worldWith([0, 0, 0]);
-    w.addChunk(new Chunk(0, 1, 0));
-    expect(w.takeDirty().map((c) => c.key).sort()).toEqual(['0,0,0', '0,1,0']);
+  it('reports removals and forgets pending changes of removed chunks', () => {
+    const w = worldWith([0, 0, 0], [0, 1, 0]);
     w.setBlock(0, S, 0, BlockId.dirt);
     w.removeChunk(0, 1, 0);
     expect(w.hasChunk(0, 1, 0)).toBe(false);
     expect(w.getBlock(0, S, 0)).toBe(BlockId.air);
-    expect(w.takeDirty().map((c) => c.key)).toEqual(['0,0,0']);
+    expect(w.takeChanges()).toEqual({ changed: [], removed: ['0,1,0'] });
+  });
+
+  it('reports a removal followed by a re-add as both (removal first, then full chunk)', () => {
+    const w = worldWith([0, 0, 0]);
+    w.removeChunk(0, 0, 0);
+    w.addChunk(new Chunk(0, 0, 0, BlockId.stone));
+    const { removed, changed } = w.takeChanges();
+    expect(removed).toEqual(['0,0,0']);
+    expect(changed[0]?.chunk.uniformBlock).toBe(BlockId.stone);
+  });
+
+  it('reports every chunk as removed on clear()', () => {
+    const w = worldWith([0, 0, 0], [1, 0, 0]);
+    w.clear();
+    expect(w.takeChanges().removed.sort()).toEqual(['0,0,0', '1,0,0']);
+    expect(w.chunkCount).toBe(0);
   });
 
   describe('vertical bounds', () => {

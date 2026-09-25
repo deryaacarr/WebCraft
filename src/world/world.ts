@@ -1,23 +1,29 @@
 import { BlockId } from './blocks';
 import type { Chunk } from './chunk';
-import { CHUNK_MASK, chunkKey, inWorldY, toChunkCoord, toLocalCoord } from './coords';
+import { BRICKS_PER_CHUNK, brickIndexInChunk, chunkKey, inWorldY, toChunkCoord, toLocalCoord } from './coords';
 
-const NEIGHBOR_OFFSETS = [
-  [1, 0, 0],
-  [-1, 0, 0],
-  [0, 1, 0],
-  [0, -1, 0],
-  [0, 0, 1],
-  [0, 0, -1],
-] as const;
+/** A loaded chunk whose contents changed; `bricks[i] === 1` marks brick i as changed. */
+export interface ChunkChange {
+  chunk: Chunk;
+  bricks: Uint8Array;
+}
+
+export interface WorldChanges {
+  /** Keys of chunks removed since the last take (process these first). */
+  removed: string[];
+  changed: ChunkChange[];
+}
 
 /**
- * Loaded chunks keyed by "x,y,z", plus tracking of chunks whose contents changed
- * since the consumer (GPU upload, meshing) last called `takeDirty()`.
+ * Loaded chunks keyed by "x,y,z", plus change tracking for the consumer that mirrors
+ * the world (the GPU brickmap). Changes are tracked per brick, so a single block edit
+ * re-uploads one brick instead of a whole chunk. A ray tracer reads neighbours directly,
+ * so an edit never dirties adjacent chunks.
  */
 export class World {
   private readonly chunks = new Map<string, Chunk>();
-  private readonly dirty = new Set<string>();
+  private readonly changed = new Map<string, Uint8Array>();
+  private readonly removed = new Set<string>();
   // Consecutive block lookups usually hit the same chunk; skip the key string then.
   private cached: Chunk | null = null;
 
@@ -41,13 +47,12 @@ export class World {
     return this.chunks.values();
   }
 
-  /** Inserts (or replaces) a chunk. It and its loaded neighbours become dirty. */
+  /** Inserts (or replaces) a chunk; all of its bricks count as changed. */
   addChunk(chunk: Chunk): void {
     const prev = this.chunks.get(chunk.key);
     if (prev && this.cached === prev) this.cached = null;
     this.chunks.set(chunk.key, chunk);
-    this.dirty.add(chunk.key);
-    this.markNeighborsDirty(chunk.cx, chunk.cy, chunk.cz);
+    this.changed.set(chunk.key, new Uint8Array(BRICKS_PER_CHUNK).fill(1));
   }
 
   removeChunk(cx: number, cy: number, cz: number): Chunk | undefined {
@@ -55,16 +60,17 @@ export class World {
     const chunk = this.chunks.get(key);
     if (!chunk) return undefined;
     this.chunks.delete(key);
-    this.dirty.delete(key);
+    this.changed.delete(key);
+    this.removed.add(key);
     if (this.cached === chunk) this.cached = null;
-    this.markNeighborsDirty(cx, cy, cz);
     return chunk;
   }
 
   /** Removes every chunk (e.g. before regenerating). */
   clear(): void {
+    for (const key of this.chunks.keys()) this.removed.add(key);
     this.chunks.clear();
-    this.dirty.clear();
+    this.changed.clear();
     this.cached = null;
   }
 
@@ -77,53 +83,41 @@ export class World {
 
   /**
    * Sets a block at world coordinates. Returns false if the chunk is not loaded, Y is
-   * outside the world bounds, or the block already had that id. Border edits also
-   * dirty the touching neighbour.
+   * outside the world bounds, or the block already had that id. Only the brick holding
+   * the block is marked as changed.
    */
   setBlock(x: number, y: number, z: number, id: number): boolean {
     if (!inWorldY(Math.floor(y))) return false;
-    const cx = toChunkCoord(x);
-    const cy = toChunkCoord(y);
-    const cz = toChunkCoord(z);
-    const chunk = this.getChunk(cx, cy, cz);
+    const chunk = this.getChunk(toChunkCoord(x), toChunkCoord(y), toChunkCoord(z));
     if (!chunk) return false;
     const lx = toLocalCoord(x);
     const ly = toLocalCoord(y);
     const lz = toLocalCoord(z);
     if (!chunk.set(lx, ly, lz, id)) return false;
 
-    this.dirty.add(chunk.key);
-    if (lx === 0) this.markDirty(cx - 1, cy, cz);
-    if (lx === CHUNK_MASK) this.markDirty(cx + 1, cy, cz);
-    if (ly === 0) this.markDirty(cx, cy - 1, cz);
-    if (ly === CHUNK_MASK) this.markDirty(cx, cy + 1, cz);
-    if (lz === 0) this.markDirty(cx, cy, cz - 1);
-    if (lz === CHUNK_MASK) this.markDirty(cx, cy, cz + 1);
+    let bricks = this.changed.get(chunk.key);
+    if (!bricks) {
+      bricks = new Uint8Array(BRICKS_PER_CHUNK);
+      this.changed.set(chunk.key, bricks);
+    }
+    bricks[brickIndexInChunk(lx, ly, lz)] = 1;
     return true;
   }
 
   isDirty(cx: number, cy: number, cz: number): boolean {
-    return this.dirty.has(chunkKey(cx, cy, cz));
+    return this.changed.has(chunkKey(cx, cy, cz));
   }
 
-  /** Returns the dirty chunks and clears the dirty set. */
-  takeDirty(): Chunk[] {
-    const out: Chunk[] = [];
-    for (const key of this.dirty) {
+  /** Returns removals and per-brick changes since the last call, then clears them. */
+  takeChanges(): WorldChanges {
+    const removed = [...this.removed];
+    const changed: ChunkChange[] = [];
+    for (const [key, bricks] of this.changed) {
       const chunk = this.chunks.get(key);
-      if (chunk) out.push(chunk);
+      if (chunk) changed.push({ chunk, bricks });
     }
-    this.dirty.clear();
-    return out;
-  }
-
-  /** Marks a loaded chunk dirty; no-op if it is not loaded. */
-  private markDirty(cx: number, cy: number, cz: number): void {
-    const key = chunkKey(cx, cy, cz);
-    if (this.chunks.has(key)) this.dirty.add(key);
-  }
-
-  private markNeighborsDirty(cx: number, cy: number, cz: number): void {
-    for (const [dx, dy, dz] of NEIGHBOR_OFFSETS) this.markDirty(cx + dx, cy + dy, cz + dz);
+    this.removed.clear();
+    this.changed.clear();
+    return { removed, changed };
   }
 }

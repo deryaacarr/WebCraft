@@ -1,3 +1,4 @@
+import type { CameraFrame } from '../../player/camera';
 import type { GpuProfiler } from '../profiler';
 
 /** Per-frame data shared by every pass. */
@@ -6,6 +7,7 @@ export interface FrameContext {
   profiler: GpuProfiler;
   /** Seconds since start, interpolated to the render moment. */
   time: number;
+  camera: CameraFrame;
 }
 
 /** Every render pass is its own class with this lifecycle. */

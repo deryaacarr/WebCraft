@@ -1,7 +1,12 @@
 import GUI from 'lil-gui';
 import Stats from 'stats-gl';
-import { config } from '../config';
+import { config, DEBUG_VIEWS } from '../config';
+import type { Vec3 } from '../core/math';
+import type { BrickmapMemory } from '../gpu/brickmap';
+import type { VerifyResult } from '../gpu/brickmap-verify';
+import type { BrickStoreStats } from '../gpu/brick-store';
 import type { GpuProfiler } from '../gpu/profiler';
+import type { TraceVerifyResult } from '../gpu/trace-verify';
 
 const MB = 2 ** 20;
 
@@ -28,6 +33,13 @@ export interface DebugOverlayHooks {
   worldStats(): WorldDebugStats;
   /** Discards the world and regenerates it from `config.terrain`. */
   onRegenerate(): void;
+  /** GPU brickmap memory and brick counters; polled while the overlay is visible. */
+  brickmapStats(): BrickmapMemory & BrickStoreStats;
+  /** Compares GPU getVoxel() with the CPU world. */
+  onVerifyBrickmap(): Promise<VerifyResult>;
+  /** Compares GPU traceRay() with the CPU voxel raycast. */
+  onVerifyTrace(): Promise<TraceVerifyResult>;
+  cameraInfo(): { position: Vec3; internal: { width: number; height: number } };
 }
 
 /**
@@ -54,6 +66,17 @@ export class DebugOverlay {
     workers: 0,
     queued: 0,
     avgChunkMs: '0',
+  };
+  private readonly brickValues = {
+    gridMB: '0',
+    poolMB: '0',
+    poolUsedMB: '0',
+    mixed: 0,
+    uniform: 0,
+    pending: 0,
+    uploadedMB: '0',
+    dropped: 0,
+    verify: '–',
   };
   private lastWorldStatsUpdate = 0;
 
@@ -103,6 +126,8 @@ export class DebugOverlay {
   }
 
   private buildConfigControls(hooks: DebugOverlayHooks): void {
+    this.gui.add(config.debug, 'view', [...DEBUG_VIEWS]).name('view');
+
     const sim = this.gui.addFolder('Simulation');
     sim.add(config.sim, 'tickRate', 10, 240, 1).name('tick rate (Hz)');
     sim.add(config.sim, 'maxFrameTime', 0.05, 1, 0.01).name('max frame (s)');
@@ -137,6 +162,8 @@ export class DebugOverlay {
     world.add(this.worldValues, 'avgChunkMs').name('gen ms/chunk').disable().listen();
 
     this.buildTerrainControls(hooks);
+    this.buildBrickmapControls(hooks);
+    this.buildCameraControls(hooks);
 
     const input = this.gui.addFolder('Input');
     input.add(config.input, 'mouseSensitivity', 0.0001, 0.01, 0.0001).name('mouse sensitivity');
@@ -175,6 +202,81 @@ export class DebugOverlay {
     this.worldValues.workers = s.workers;
     this.worldValues.queued = s.queued;
     this.worldValues.avgChunkMs = s.avgChunkMs.toFixed(2);
+
+    const cam = this.hooks.cameraInfo();
+    this.cameraValues.position = cam.position.map((c) => c.toFixed(1)).join(', ');
+    this.cameraValues.internal = `${cam.internal.width}×${cam.internal.height}`;
+
+    const b = this.hooks.brickmapStats();
+    this.brickValues.gridMB = (b.gridBytes / MB).toFixed(1);
+    this.brickValues.poolMB = (b.poolBytes / MB).toFixed(1);
+    this.brickValues.poolUsedMB = (b.poolUsedBytes / MB).toFixed(1);
+    this.brickValues.mixed = b.mixedBricks;
+    this.brickValues.uniform = b.uniformBricks;
+    this.brickValues.pending = b.pendingChunks;
+    this.brickValues.uploadedMB = (b.uploadedBytes / MB).toFixed(1);
+    this.brickValues.dropped = b.droppedBricks;
+  }
+
+  private readonly cameraValues = { position: '', internal: '', verify: '–' };
+
+  private buildCameraControls(hooks: DebugOverlayHooks): void {
+    const v = this.cameraValues;
+    const f = this.gui.addFolder('Camera & rays');
+    f.add(config.camera, 'fovY', 30, 120, 1).name('FOV (°)');
+    f.add(config.camera, 'speed', 1, 200, 1).name('speed (blocks/s)');
+    f.add(config.camera, 'far', 32, 2048, 16).name('far (blocks)');
+    f.add(config.camera, 'jitter').name('jitter (Halton 2,3)');
+    f.add(config.trace, 'maxSteps', 16, 4096, 1).name('max DDA steps');
+    f.add(v, 'position').name('position').disable().listen();
+    f.add(v, 'internal').name('traced resolution').disable().listen();
+    f.add(v, 'verify').name('verify result').disable().listen();
+    const actions = {
+      verify: () => {
+        v.verify = 'running…';
+        hooks.onVerifyTrace().then(
+          (r) => {
+            v.verify = `${r.agree}/${r.rays} agree (${r.hits} hits), ${r.ms.toFixed(0)} ms`;
+            (r.agree === r.rays ? console.info : console.warn)('[trace] verify:', r);
+          },
+          (err: unknown) => {
+            v.verify = `error: ${err instanceof Error ? err.message : String(err)}`;
+          },
+        );
+      },
+    };
+    f.add(actions, 'verify').name('Verify rays (GPU vs CPU)');
+  }
+
+  private buildBrickmapControls(hooks: DebugOverlayHooks): void {
+    const v = this.brickValues;
+    const f = this.gui.addFolder('GPU brickmap');
+    f.add(config.debug, 'topdownBlocksPerPixel', 0.25, 8, 0.25).name('top-down zoom (blocks/px)');
+    f.add(v, 'gridMB').name('grid (MB)').disable().listen();
+    f.add(v, 'poolMB').name('pool allocated (MB)').disable().listen();
+    f.add(v, 'poolUsedMB').name('pool used (MB)').disable().listen();
+    f.add(v, 'mixed').name('mixed bricks').disable().listen();
+    f.add(v, 'uniform').name('uniform bricks').disable().listen();
+    f.add(v, 'pending').name('upload queue (chunks)').disable().listen();
+    f.add(v, 'uploadedMB').name('uploaded total (MB)').disable().listen();
+    f.add(v, 'dropped').name('dropped (pool full)').disable().listen();
+    f.add(v, 'verify').name('verify result').disable().listen();
+    const actions = {
+      verify: () => {
+        v.verify = 'running…';
+        hooks.onVerifyBrickmap().then(
+          (r) => {
+            v.verify = `${r.mismatches}/${r.samples} wrong (${r.solid} solid), ${r.ms.toFixed(0)} ms`;
+            const log = r.mismatches === 0 ? console.info : console.error;
+            log('[brickmap] verify:', r);
+          },
+          (err: unknown) => {
+            v.verify = `error: ${err instanceof Error ? err.message : String(err)}`;
+          },
+        );
+      },
+    };
+    f.add(actions, 'verify').name('Verify brickmap (GPU vs CPU)');
   }
 
   /** Terrain params only take effect on "Regenerate" (the workers hold their own copy). */

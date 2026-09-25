@@ -2,6 +2,9 @@
  * Single source of truth for every tunable parameter.
  * Anything exposed here can be edited live from the debug panel (F3).
  */
+export const DEBUG_VIEWS = ['lit', 'albedo', 'normal', 'depth', 'steps', 'motion', 'uv', 'material', 'topdown', 'gradient'] as const;
+export type DebugView = (typeof DEBUG_VIEWS)[number];
+
 /** Spline control points; a helper so config stays plain mutable data with a precise type. */
 function points(...p: [number, number][]): [number, number][] {
   return p;
@@ -15,8 +18,9 @@ export const config = {
     maxFrameTime: 0.25,
   },
   render: {
-    /** Internal resolution relative to the canvas backing size (upscaled in the blit pass). */
-    renderScale: 1.0,
+    /** Internal (traced) resolution relative to the canvas backing size, upscaled in the
+     *  blit pass. 0.5 on a Retina canvas ≈ 1440×800 primary rays. */
+    renderScale: 0.5,
     /** Upper bound on devicePixelRatio to keep 4K/Retina displays affordable. */
     maxPixelRatio: 2.0,
     /** Workgroup edge length for 2D compute passes; must match @workgroup_size in WGSL. */
@@ -35,6 +39,22 @@ export const config = {
     minY: -64,
     /** Top of the world (exclusive). Chunks entirely at or above are never loaded. */
     maxY: 320,
+    /** log2 of the GPU brick edge length (3 → 8³ voxels). Structural. */
+    brickBits: 3,
+  },
+  brickmap: {
+    /** Toroidal brick grid width on X and Z, in chunks (power of two). Must exceed the
+     *  streamed diameter 2·(horizontalRadius + unloadMargin) + 1. Vertically the grid
+     *  spans world.minY..world.maxY. */
+    gridChunksXZ: 32,
+    /** Initial brick pool size (mixed bricks); grows on demand up to the device limit. */
+    initialPoolBricks: 81920,
+    /** Pool growth factor when it runs out of slots. */
+    poolGrowth: 1.5,
+    /** Main-thread time per frame spent packing and uploading changed chunks (ms). */
+    uploadBudgetMs: 3,
+    /** Positions sampled by the "verify brickmap" debug check. */
+    verifySamples: 65536,
   },
   generation: {
     /** Terrain worker count; 0 = navigator.hardwareConcurrency - 1. */
@@ -124,11 +144,51 @@ export const config = {
     /** Max chunk requests in flight at once (should exceed the worker count to keep all busy). */
     maxInFlight: 32,
   },
+  camera: {
+    /** Vertical field of view in degrees. */
+    fovY: 70,
+    /** Near plane (blocks); used for projection / motion vectors. */
+    near: 0.05,
+    /** Far plane (blocks); rays stop here. */
+    far: 1024,
+    /** Fly speed in blocks per second. */
+    speed: 20,
+    /** Speed multiplier while ControlLeft is held. */
+    boostMultiplier: 5,
+    /** Pitch limit in degrees (avoids flipping over the poles). */
+    maxPitch: 89,
+    /** Sub-pixel Halton(2,3) jitter for TAA. Off until TAA exists (it shimmers without it). */
+    jitter: false,
+    /** Jitter sequence length before it repeats. */
+    jitterSequenceLength: 8,
+    /** Spawn height above the ground. */
+    spawnHeight: 30,
+  },
+  trace: {
+    /** Upper bound on DDA iterations (brick steps + voxel steps) per primary ray. */
+    maxSteps: 512,
+    /** Rays checked by the "verify rays" debug tool. */
+    verifySamples: 4096,
+    /** Ray length for the verify tool (inside the resident window). */
+    verifyMaxDistance: 200,
+    /** Step cap for the verify tool: high enough that no ray is cut short. */
+    verifyMaxSteps: 4096,
+  },
   input: {
     /** Radians per pixel of mouse movement. */
     mouseSensitivity: 0.002,
   },
   debug: {
+    /** What the screen shows. G-buffer views come from the primary ray pass. */
+    view: 'lit' as DebugView,
+    /** Top-down brickmap view zoom: world blocks per screen pixel. */
+    topdownBlocksPerPixel: 1,
+    /** Direction towards the sun for the placeholder "lit" view. */
+    sunDirection: [0.45, 0.8, 0.35] as [number, number, number],
+    /** Motion view: UV delta multiplier before display. */
+    motionScale: 20,
+    /** Depth view: depth (blocks) at which the grey ramp reaches 50 %. */
+    depthHalf: 64,
     /** Key that toggles the debug overlay. */
     toggleKey: 'F3',
     /** Show the overlay on start. */

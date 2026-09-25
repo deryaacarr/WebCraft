@@ -24,6 +24,25 @@ export const MATERIAL_NAMES = [
 
 export type MaterialName = (typeof MATERIAL_NAMES)[number];
 
+/** Approximate sRGB albedo per material (0xRRGGBB) until textures exist. */
+export const MATERIAL_COLORS: Record<MaterialName, number> = {
+  grass_top: 0x5f9e3a,
+  grass_side: 0x6e7a3c,
+  dirt: 0x7a5534,
+  stone: 0x7f7f7f,
+  cobblestone: 0x6b6b6b,
+  gravel: 0x8a827a,
+  sand: 0xd8c894,
+  water: 0x2f5fb0,
+  oak_log_top: 0x9c7a4a,
+  oak_log_side: 0x6b4f2a,
+  oak_leaves: 0x3c7a2a,
+  oak_planks: 0xa9824f,
+  glass: 0xcfe8f0,
+  torch: 0xffc050,
+  lava: 0xff5a10,
+};
+
 /** Material index used for faces that are never drawn (air). */
 export const NO_MATERIAL = 0xffff;
 
@@ -71,6 +90,8 @@ export interface BlockDef {
   materials: FaceMaterials;
   /** Footstep sound set; null for blocks you cannot stand on. */
   footstep: FootstepMaterial | null;
+  /** Approximate sRGB albedo (0xRRGGBB), for debug views until textures exist. */
+  color: number;
 }
 
 interface BlockSpec {
@@ -80,35 +101,36 @@ interface BlockSpec {
   /** One material for all faces, or per-face materials. */
   faces: MaterialName | { top: MaterialName; side: MaterialName; bottom: MaterialName } | null;
   footstep: FootstepMaterial | null;
+  color: number;
 }
 
 const SPECS = {
-  air: { solid: false, transparent: true, emissive: 0, faces: null, footstep: null },
+  air: { solid: false, transparent: true, emissive: 0, faces: null, footstep: null, color: 0x000000 },
   grass: {
     solid: true,
     transparent: false,
     emissive: 0,
     faces: { top: 'grass_top', side: 'grass_side', bottom: 'dirt' },
-    footstep: 'grass',
+    footstep: 'grass', color: 0x5f9e3a,
   },
-  dirt: { solid: true, transparent: false, emissive: 0, faces: 'dirt', footstep: 'grass' },
-  stone: { solid: true, transparent: false, emissive: 0, faces: 'stone', footstep: 'stone' },
-  cobblestone: { solid: true, transparent: false, emissive: 0, faces: 'cobblestone', footstep: 'stone' },
-  gravel: { solid: true, transparent: false, emissive: 0, faces: 'gravel', footstep: 'gravel' },
-  sand: { solid: true, transparent: false, emissive: 0, faces: 'sand', footstep: 'sand' },
-  water: { solid: false, transparent: true, emissive: 0, faces: 'water', footstep: null },
+  dirt: { solid: true, transparent: false, emissive: 0, faces: 'dirt', footstep: 'grass', color: 0x7a5534 },
+  stone: { solid: true, transparent: false, emissive: 0, faces: 'stone', footstep: 'stone', color: 0x7f7f7f },
+  cobblestone: { solid: true, transparent: false, emissive: 0, faces: 'cobblestone', footstep: 'stone', color: 0x6b6b6b },
+  gravel: { solid: true, transparent: false, emissive: 0, faces: 'gravel', footstep: 'gravel', color: 0x8a827a },
+  sand: { solid: true, transparent: false, emissive: 0, faces: 'sand', footstep: 'sand', color: 0xd8c894 },
+  water: { solid: false, transparent: true, emissive: 0, faces: 'water', footstep: null, color: 0x2f5fb0 },
   oak_log: {
     solid: true,
     transparent: false,
     emissive: 0,
     faces: { top: 'oak_log_top', side: 'oak_log_side', bottom: 'oak_log_top' },
-    footstep: 'wood',
+    footstep: 'wood', color: 0x6b4f2a,
   },
-  oak_leaves: { solid: true, transparent: true, emissive: 0, faces: 'oak_leaves', footstep: 'grass' },
-  oak_planks: { solid: true, transparent: false, emissive: 0, faces: 'oak_planks', footstep: 'wood' },
-  glass: { solid: true, transparent: true, emissive: 0, faces: 'glass', footstep: 'stone' },
-  torch: { solid: false, transparent: true, emissive: 8, faces: 'torch', footstep: null },
-  lava: { solid: false, transparent: false, emissive: 4, faces: 'lava', footstep: null },
+  oak_leaves: { solid: true, transparent: true, emissive: 0, faces: 'oak_leaves', footstep: 'grass', color: 0x3c7a2a },
+  oak_planks: { solid: true, transparent: false, emissive: 0, faces: 'oak_planks', footstep: 'wood', color: 0xa9824f },
+  glass: { solid: true, transparent: true, emissive: 0, faces: 'glass', footstep: 'stone', color: 0xcfe8f0 },
+  torch: { solid: false, transparent: true, emissive: 8, faces: 'torch', footstep: null, color: 0xffc050 },
+  lava: { solid: false, transparent: false, emissive: 4, faces: 'lava', footstep: null, color: 0xff5a10 },
 } satisfies Record<BlockName, BlockSpec>;
 
 function toFaceMaterials(faces: BlockSpec['faces']): FaceMaterials {
@@ -136,6 +158,7 @@ export const BLOCKS: readonly BlockDef[] = (Object.keys(BlockId) as BlockName[])
       emissive: spec.emissive,
       materials: toFaceMaterials(spec.faces),
       footstep: spec.footstep,
+      color: spec.color,
     };
   })
   .sort((a, b) => a.id - b.id);

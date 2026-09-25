@@ -1,4 +1,5 @@
 #include "common.wgsl"
+#include "color.wgsl"
 
 struct Params {
   size: vec2u,
@@ -28,5 +29,6 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     vec3f(1.0, 1.0, 1.0),
     vec3f(0.0, 0.33, 0.67),
   );
-  textureStore(output, vec2i(id.xy), vec4f(color, 1.0));
+  // The palette is designed in display space; scene textures are linear.
+  textureStore(output, vec2i(id.xy), vec4f(srgbToLinear(color), 1.0));
 }

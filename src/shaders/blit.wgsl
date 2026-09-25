@@ -13,10 +13,13 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VertexOut {
   return out;
 }
 
+#include "color.wgsl"
+
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var source_sampler: sampler;
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4f {
-  return vec4f(textureSample(source, source_sampler, in.uv).rgb, 1.0);
+  // Scene textures are linear; the swap chain is a plain (non-sRGB) format.
+  return vec4f(linearToSrgb(textureSample(source, source_sampler, in.uv).rgb), 1.0);
 }

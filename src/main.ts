@@ -1,8 +1,13 @@
 import { config } from './config';
 import { Input } from './core/input';
+import type { Vec3 } from './core/math';
 import { GameLoop } from './core/loop';
 import { initGpu, WebGPUUnsupportedError } from './gpu/device';
+import { GpuBrickmap } from './gpu/brickmap';
+import { verifyBrickmap } from './gpu/brickmap-verify';
+import { verifyTrace } from './gpu/trace-verify';
 import { Renderer } from './gpu/renderer';
+import { FlyCamera } from './player/camera';
 import { DebugOverlay } from './ui/debug-overlay';
 import { showErrorScreen } from './ui/error-screen';
 import { TerrainGenerator } from './world/gen/terrain';
@@ -16,7 +21,8 @@ async function main(): Promise<void> {
 
   const gpu = await initGpu(canvas);
 
-  const renderer = new Renderer(gpu, canvas);
+  const brickmap = new GpuBrickmap(gpu.device);
+  const renderer = new Renderer(gpu, canvas, brickmap);
   await renderer.init();
 
   const world = new World();
@@ -28,22 +34,30 @@ async function main(): Promise<void> {
   );
   const streamer = new ChunkStreamer(world, pool);
 
-  // Placeholder until the player controller exists: stand above the ground (or water) at the origin.
-  const spawnY = () =>
-    Math.max(new TerrainGenerator(config.terrain, config.world).surfaceY(0, 0), config.terrain.seaLevel) + 2;
-  const playerPosition = { x: 0, y: spawnY(), z: 0 };
+  // Debug fly camera, spawned above the ground (or water) at the origin.
+  const spawn = (): Vec3 => [
+    0.5,
+    Math.max(new TerrainGenerator(config.terrain, config.world).surfaceY(0, 0), config.terrain.seaLevel) +
+      config.camera.spawnHeight,
+    0.5,
+  ];
+  let camera = new FlyCamera(spawn());
 
   const regenerate = () => {
     streamer.reset();
     world.clear();
     pool.reset(config.terrain, config.generation.heightCacheColumns);
-    playerPosition.y = spawnY();
+    camera = new FlyCamera(spawn());
   };
 
   const input = new Input(canvas);
   const debug = new DebugOverlay(renderer.profiler, {
     onResolutionChange: () => renderer.invalidateResolution(),
     onRegenerate: regenerate,
+    brickmapStats: () => ({ ...brickmap.memory, ...brickmap.store.stats }),
+    onVerifyBrickmap: () => verifyBrickmap(gpu.device, brickmap, world),
+    onVerifyTrace: () => verifyTrace(gpu.device, brickmap, world, camera.position),
+    cameraInfo: () => ({ position: camera.position, internal: renderer.internalSize }),
     worldStats: () => {
       let dense = 0;
       let chunkBytes = 0;
@@ -58,14 +72,16 @@ async function main(): Promise<void> {
   });
 
   const loop = new GameLoop({
-    update: () => {
-      // Simulation systems (player, weather) will tick here.
-      streamer.update(playerPosition.x, playerPosition.y, playerPosition.z);
+    update: (dt) => {
+      camera.update(dt, input);
+      const [x, y, z] = camera.position;
+      streamer.update(x, y, z);
       input.endTick();
     },
-    render: (_alpha, time) => {
+    render: (alpha, time) => {
       debug.beginFrame();
-      renderer.render(time);
+      brickmap.sync(world, camera.position[0], camera.position[2]);
+      renderer.render(time, camera, alpha);
       debug.endFrame();
     },
   });

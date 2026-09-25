@@ -24,7 +24,12 @@ export async function initGpu(canvas: HTMLCanvasElement): Promise<GpuContext> {
   }
 
   const requiredFeatures = OPTIONAL_FEATURES.filter((f) => adapter.features.has(f));
-  const device = await adapter.requestDevice({ requiredFeatures });
+  // The brick pool is one large storage buffer: ask for everything the adapter offers.
+  const requiredLimits = {
+    maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+    maxBufferSize: adapter.limits.maxBufferSize,
+  };
+  const device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
 
   device.addEventListener('uncapturederror', (event) => {
     console.error('[WebGPU] Yakalanmamış hata:', event.error.message);
@@ -41,7 +46,8 @@ export async function initGpu(canvas: HTMLCanvasElement): Promise<GpuContext> {
   const timestampQuery = device.features.has('timestamp-query');
   console.info(
     `[WebGPU] ${adapter.info.vendor || 'unknown'} ${adapter.info.architecture || ''} — ` +
-      `format=${format}, timestamp-query=${timestampQuery}`,
+      `format=${format}, timestamp-query=${timestampQuery}, ` +
+      `maxStorageBinding=${(device.limits.maxStorageBufferBindingSize / 2 ** 20).toFixed(0)} MB`,
   );
 
   return { adapter, device, context, format, timestampQuery };

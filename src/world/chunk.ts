@@ -97,6 +97,11 @@ export class Chunk {
     return this.nonAir;
   }
 
+  /** The dense block array, or null for a uniform chunk. Read-only: mutate through set(). */
+  get denseData(): Readonly<BlockArray> | null {
+    return this.data;
+  }
+
   /** Bytes held by the dense block array (0 for uniform chunks). */
   get byteLength(): number {
     return this.data?.byteLength ?? 0;
