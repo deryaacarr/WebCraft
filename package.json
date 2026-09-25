@@ -1,0 +1,22 @@
+{
+  "name": "webcraft",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.74",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.1",
+    "vitest": "^5.0.2"
+  },
+  "dependencies": {
+    "lil-gui": "^0.21.0",
+    "stats-gl": "^4.2.3"
+  }
+}
