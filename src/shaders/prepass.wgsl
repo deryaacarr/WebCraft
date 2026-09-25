@@ -7,6 +7,11 @@
 // around it lies in space known to be empty: outside the occupied box (bounds) or inside
 // a distance-field box. It stops at the first occupied brick or when that margin runs out.
 #include "trace.wgsl"
+
+/// No materials here: every non-air voxel is opaque (see trace.wgsl).
+fn traceOpaque(id: u32, cell: vec3i, normal: vec3i, local: vec3f, t: f32, dir: vec3f) -> bool {
+  return true;
+}
 #include "camera.wgsl"
 
 override WORKGROUP_X: u32 = 8u;

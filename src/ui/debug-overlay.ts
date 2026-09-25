@@ -1,6 +1,7 @@
 import GUI from 'lil-gui';
 import Stats from 'stats-gl';
-import { config, DEBUG_VIEWS } from '../config';
+import { config, DEBUG_VIEWS, TEXTURE_RESOLUTIONS, type TextureResolution } from '../config';
+import type { MaterialStats } from '../gpu/materials';
 import type { Vec3 } from '../core/math';
 import type { BrickmapMemory } from '../gpu/brickmap';
 import type { VerifyResult } from '../gpu/brickmap-verify';
@@ -42,6 +43,11 @@ export interface DebugOverlayHooks {
   cameraInfo(): { position: Vec3; internal: { width: number; height: number } };
   /** Times the primary pass alone, back to back. */
   onBenchmarkPrimary(): Promise<{ gpuMs: number | null; wallMs: number; avgSteps: number; p95Steps: number }>;
+  materialStats(): MaterialStats;
+  /** Reloads the material textures at another resolution. */
+  onTextureResolution(resolution: TextureResolution): Promise<void>;
+  /** Re-creates the material sampler (anisotropy changed). */
+  onSamplerChange(): void;
   /** Compares the G-buffer rendered with and without the depth prepass. */
   onVerifyPrepass(): Promise<{ pixels: number; mismatches: number; first?: string }>;
 }
@@ -168,6 +174,7 @@ export class DebugOverlay {
     this.buildTerrainControls(hooks);
     this.buildBrickmapControls(hooks);
     this.buildCameraControls(hooks);
+    this.buildMaterialControls(hooks);
 
     const input = this.gui.addFolder('Input');
     input.add(config.input, 'mouseSensitivity', 0.0001, 0.01, 0.0001).name('mouse sensitivity');
@@ -207,6 +214,12 @@ export class DebugOverlay {
     this.worldValues.queued = s.queued;
     this.worldValues.avgChunkMs = s.avgChunkMs.toFixed(2);
 
+    const m = this.hooks.materialStats();
+    if (this.materialValues.source !== 'loading…' || m.resolution === config.textures.resolution) {
+      this.materialValues.source = `${m.source} ${m.resolution}px, ${m.layers} layers`;
+    }
+    this.materialValues.memoryMB = (m.bytes / MB).toFixed(1);
+
     const cam = this.hooks.cameraInfo();
     this.cameraValues.position = cam.position.map((c) => c.toFixed(1)).join(', ');
     this.cameraValues.internal = `${cam.internal.width}×${cam.internal.height}`;
@@ -220,6 +233,46 @@ export class DebugOverlay {
     this.brickValues.pending = b.pendingChunks;
     this.brickValues.uploadedMB = (b.uploadedBytes / MB).toFixed(1);
     this.brickValues.dropped = b.droppedBricks;
+  }
+
+  private readonly materialValues = { source: '', memoryMB: '0', primary: '–' };
+
+  private buildMaterialControls(hooks: DebugOverlayHooks): void {
+    const v = this.materialValues;
+    const t = config.textures;
+    const f = this.gui.addFolder('Materials');
+    const labels: Record<string, TextureResolution> = {};
+    for (const r of TEXTURE_RESOLUTIONS) labels[r === 256 ? '256 px (Ultra)' : `${r} px`] = r;
+    f.add(t, 'resolution', labels)
+      .name('texture resolution')
+      .onChange((r: TextureResolution) => {
+        v.source = 'loading…';
+        void hooks.onTextureResolution(r);
+      });
+    f.add(t, 'lodBias', -2, 3, 0.25).name('LOD bias');
+    f.add(t, 'maxAnisotropy', [1, 2, 4, 8, 16]).name('anisotropy').onChange(() => hooks.onSamplerChange());
+    f.add(t, 'pom').name('parallax (POM)');
+    f.add(t, 'pomDepth', 0, 0.2, 0.005).name('POM depth (blocks)');
+    f.add(t, 'pomSteps', 2, 32, 1).name('POM steps');
+    f.add(t, 'pomMaxDistance', 4, 128, 1).name('POM max distance');
+    f.add(t, 'alphaCutoff', 0.05, 0.95, 0.05).name('leaf alpha cutoff');
+    f.add(v, 'source').name('textures').disable().listen();
+    f.add(v, 'memoryMB').name('texture memory (MB)').disable().listen();
+    f.add(v, 'primary').name('primary pass').disable().listen();
+    const bench = {
+      run: () => {
+        v.primary = 'running…';
+        hooks.onBenchmarkPrimary().then(
+          (r) => {
+            v.primary = `${r.gpuMs?.toFixed(2) ?? r.wallMs.toFixed(2)} ms`;
+          },
+          (err: unknown) => {
+            v.primary = `error: ${err instanceof Error ? err.message : String(err)}`;
+          },
+        );
+      },
+    };
+    f.add(bench, 'run').name('Benchmark primary pass');
   }
 
   private readonly cameraValues = { position: '', internal: '', verify: '–', benchmark: '–', prepass: '–' };

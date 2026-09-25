@@ -1,6 +1,11 @@
 // Debug check: traces CPU-chosen rays so the hits can be compared with raycast.ts.
 #include "trace.wgsl"
 
+/// No materials here: every non-air voxel is opaque (see trace.wgsl).
+fn traceOpaque(id: u32, cell: vec3i, normal: vec3i, local: vec3f, t: f32, dir: vec3f) -> bool {
+  return true;
+}
+
 struct RayIn {
   cell: vec3i,
   _pad0: i32,

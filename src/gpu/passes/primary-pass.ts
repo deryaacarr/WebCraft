@@ -1,23 +1,14 @@
 import { config } from '../../config';
-import { BLOCKS, MATERIAL_COLORS, MATERIAL_NAMES } from '../../world/blocks';
 import type { GpuBrickmap } from '../brickmap';
 import type { GBuffer } from '../gbuffer';
 import { createShaderModule } from '../shader';
+import type { MaterialSystem } from '../materials';
 import { traceConstants } from '../trace-constants';
 import type { FrameContext, RenderPass } from './pass';
 
 // Camera struct in camera.wgsl: 3 × mat4x4f (192 B) + 5 × 16 B.
 const CAMERA_SIZE = 272;
 const DEG = Math.PI / 180;
-
-/** sRGB 0xRRGGBB → linear [r, g, b]. */
-export function srgbHexToLinear(hex: number): [number, number, number] {
-  const c = (v: number) => {
-    const s = v / 255;
-    return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
-  };
-  return [c((hex >> 16) & 0xff), c((hex >> 8) & 0xff), c(hex & 0xff)];
-}
 
 /**
  * Traces one ray per pixel through the brickmap and fills the G-buffer. A depth prepass
@@ -33,8 +24,7 @@ export class PrimaryPass implements RenderPass {
   private brickmapLayout!: GPUBindGroupLayout;
   private prepassLayout!: GPUBindGroupLayout;
   private camera!: GPUBuffer;
-  private faces!: GPUBuffer;
-  private albedo!: GPUBuffer;
+  private materialLayout!: GPUBindGroupLayout;
   private bindGroup: GPUBindGroup | null = null;
   private readonly cameraData = new ArrayBuffer(CAMERA_SIZE);
   private readonly workgroup = config.trace.workgroup;
@@ -43,6 +33,7 @@ export class PrimaryPass implements RenderPass {
     private readonly device: GPUDevice,
     private readonly brickmap: GpuBrickmap,
     private readonly gbuffer: GBuffer,
+    private readonly materials: MaterialSystem,
   ) {}
 
   async init(): Promise<void> {
@@ -68,12 +59,7 @@ export class PrimaryPass implements RenderPass {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    const faces = new Uint32Array(BLOCKS.length * 4);
-    BLOCKS.forEach((b, i) => faces.set([b.materials.top, b.materials.side, b.materials.bottom, 0], i * 4));
-    this.faces = this.upload(`${this.name}-faces`, faces);
-    const albedo = new Float32Array(MATERIAL_NAMES.length * 4);
-    MATERIAL_NAMES.forEach((m, i) => albedo.set([...srgbHexToLinear(MATERIAL_COLORS[m]), 1], i * 4));
-    this.albedo = this.upload(`${this.name}-albedo`, albedo);
+    this.materialLayout = this.pipeline.getBindGroupLayout(2);
   }
 
   resize(width: number, height: number): void {
@@ -103,9 +89,7 @@ export class PrimaryPass implements RenderPass {
         { binding: 1, resource: g.gbuffer0.createView() },
         { binding: 2, resource: g.depth.createView() },
         { binding: 3, resource: g.motion.createView() },
-        { binding: 4, resource: { buffer: this.faces } },
-        { binding: 5, resource: { buffer: this.albedo } },
-        { binding: 6, resource: this.coarse.createView() },
+        { binding: 4, resource: this.coarse.createView() },
       ],
     });
   }
@@ -136,6 +120,8 @@ export class PrimaryPass implements RenderPass {
     // Every ray of a tile passes within half a tile diagonal (in pixels) of its centre ray;
     // at distance t that is at most t · (pixels · tan-space size of one pixel).
     const pixelTan = (2 * Math.tan((config.camera.fovY * DEG) / 2)) / this.gbuffer.height;
+    // Ray cone for texture filtering: one pixel's footprint grows by pixelTan per block.
+    this.materials.update(pixelTan);
     f32[59] = ((tile * Math.SQRT2) / 2) * pixelTan * config.trace.prepassConeMargin;
     f32[63] = config.trace.prepassSafety;
     u32[66] = prepass ? tile : 0;
@@ -154,13 +140,8 @@ export class PrimaryPass implements RenderPass {
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.bindGroup);
     pass.setBindGroup(1, this.brickmap.bindGroup(this.brickmapLayout));
+    pass.setBindGroup(2, this.materials.bindGroup(this.materialLayout));
     pass.dispatchWorkgroups(Math.ceil(this.gbuffer.width / this.workgroup[0]), Math.ceil(this.gbuffer.height / this.workgroup[1]));
     pass.end();
-  }
-
-  private upload(label: string, data: Uint32Array | Float32Array): GPUBuffer {
-    const buffer = this.device.createBuffer({ label, size: data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    this.device.queue.writeBuffer(buffer, 0, data);
-    return buffer;
   }
 }

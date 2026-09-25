@@ -29,3 +29,6 @@ coverage/
 
 # Raw (unprocessed) assets
 assets/raw/
+
+# Generated texture packs (npm run textures)
+public/textures/

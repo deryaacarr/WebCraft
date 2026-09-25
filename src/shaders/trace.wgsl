@@ -27,6 +27,11 @@ fn boundaryT(cell_min: vec3i, size: i32, step_pos: vec3i, origin_cell: vec3i, or
   return (vec3f(cell_min + step_pos * size - origin_cell) - origin_frac) * inv;
 }
 
+// Every shader that includes this file defines
+//   fn traceOpaque(id: u32, cell: vec3i, normal: vec3i, local: vec3f, t: f32, dir: vec3f) -> bool
+// which decides whether a non-air voxel stops the ray at this point (alpha-tested leaves
+// let it through where transparent). Passes without materials simply return true.
+
 /// Traces from origin_cell + origin_frac (frac in [0, 1)) along the normalised `dir`.
 /// Positions are kept relative to origin_cell, so precision does not degrade far from 0.
 /// `t_min`: the ray is known to hit nothing before this distance (depth prepass); 0 if unknown.
@@ -75,6 +80,8 @@ fn traceRay(origin_cell: vec3i, origin_frac: vec3f, dir: vec3f, t_min: f32, max_
   var bmin = vec3i(0);
   var base = 0u;
   var occ = vec2u(0u);
+  /// Non-zero while walking a uniform brick voxel by voxel (a see-through uniform brick).
+  var uniform_id = 0u;
   // Sub-cells: 4 per brick axis, each sub_size³ voxels.
   let sub_bits = BRICK_BITS - 2u;
   let sub_size = 1 << sub_bits;
@@ -108,20 +115,29 @@ fn traceRay(origin_cell: vec3i, origin_frac: vec3f, dir: vec3f, t_min: f32, max_
         normal[a] = -step[a];
         continue;
       }
-      if ((ptr & BRICK_UNIFORM_FLAG) != 0u) {
-        // Solid uniform brick: the entry voxel is the hit.
-        r.hit = true;
-        r.cell = c;
-        r.normal = normal;
-        r.t = t;
-        r.id = ptr & BRICK_UNIFORM_ID_MASK;
-        return r;
-      }
-      // Mixed brick: enter it and take the first voxel / sub-cell step right away.
       in_brick = true;
       bmin = b * bs;
-      base = ptr * brickStride();
-      occ = vec2u(brick_pool[base + brickVoxelWords()], brick_pool[base + brickVoxelWords() + 1u]);
+      if ((ptr & BRICK_UNIFORM_FLAG) != 0u) {
+        // Uniform brick: the entry voxel is the hit, unless it is see-through there; then
+        // walk it voxel by voxel like a fully occupied mixed brick.
+        let id = ptr & BRICK_UNIFORM_ID_MASK;
+        if (traceOpaque(id, c, normal, origin_frac + dir * t - vec3f(c - origin_cell), t, dir)) {
+          r.hit = true;
+          r.cell = c;
+          r.normal = normal;
+          r.t = t;
+          r.id = id;
+          return r;
+        }
+        uniform_id = id;
+        base = 0u;
+        occ = vec2u(0xffffffffu);
+      } else {
+        // Mixed brick: enter it and take the first voxel / sub-cell step right away.
+        uniform_id = 0u;
+        base = ptr * brickStride();
+        occ = vec2u(brick_pool[base + brickVoxelWords()], brick_pool[base + brickVoxelWords() + 1u]);
+      }
     }
 
     let i = vec3u(c - bmin);
@@ -140,8 +156,8 @@ fn traceRay(origin_cell: vec3i, origin_frac: vec3f, dir: vec3f, t_min: f32, max_
     } else {
       // Voxel step: one load per voxel.
       let v = (i.y << (2u * BRICK_BITS)) | (i.z << BRICK_BITS) | i.x;
-      let id = (brick_pool[base + (v >> 2u)] >> ((v & 3u) * 8u)) & 0xffu;
-      if (id != 0u) {
+      let id = select((brick_pool[base + (v >> 2u)] >> ((v & 3u) * 8u)) & 0xffu, uniform_id, uniform_id != 0u);
+      if (id != 0u && traceOpaque(id, c, normal, origin_frac + dir * t - vec3f(c - origin_cell), t, dir)) {
         r.hit = true;
         r.cell = c;
         r.normal = normal;

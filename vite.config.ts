@@ -12,7 +12,7 @@ export default defineConfig({
   preview: { headers: crossOriginIsolation },
   build: { target: 'es2022' },
   test: {
-    include: ['src/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'scripts/**/*.test.ts'],
     environment: 'node',
   },
 });

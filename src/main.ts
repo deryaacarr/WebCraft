@@ -7,6 +7,7 @@ import { initGpu, WebGPUUnsupportedError } from './gpu/device';
 import { GpuBrickmap } from './gpu/brickmap';
 import { verifyBrickmap } from './gpu/brickmap-verify';
 import { verifyTrace } from './gpu/trace-verify';
+import { MaterialSystem } from './gpu/materials';
 import { Renderer } from './gpu/renderer';
 import { FlyCamera } from './player/camera';
 import { DebugOverlay } from './ui/debug-overlay';
@@ -31,7 +32,9 @@ async function main(): Promise<void> {
 
   const brickmap = new GpuBrickmap(gpu.device);
   await brickmap.init();
-  const renderer = new Renderer(gpu, canvas, brickmap);
+  const materials = new MaterialSystem(gpu.device);
+  await materials.init();
+  const renderer = new Renderer(gpu, canvas, brickmap, materials);
   await renderer.init();
 
   const world = new World();
@@ -70,6 +73,9 @@ async function main(): Promise<void> {
     cameraInfo: () => ({ position: camera.position, internal: renderer.internalSize }),
     onBenchmarkPrimary: () => renderer.benchmarkPrimary(config.debug.benchmarkIterations),
     onVerifyPrepass: () => renderer.verifyPrepass(),
+    materialStats: () => materials.stats,
+    onTextureResolution: (res) => materials.load(res),
+    onSamplerChange: () => materials.createSampler(),
     worldStats: () => {
       let dense = 0;
       let chunkBytes = 0;

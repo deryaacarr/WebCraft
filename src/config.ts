@@ -2,7 +2,10 @@
  * Single source of truth for every tunable parameter.
  * Anything exposed here can be edited live from the debug panel (F3).
  */
-export const DEBUG_VIEWS = ['lit', 'albedo', 'normal', 'depth', 'steps', 'motion', 'uv', 'material', 'topdown', 'gradient'] as const;
+export const TEXTURE_RESOLUTIONS = [16, 32, 64, 128, 256] as const;
+export type TextureResolution = (typeof TEXTURE_RESOLUTIONS)[number];
+
+export const DEBUG_VIEWS = ['lit', 'albedo', 'normal', 'depth', 'steps', 'motion', 'roughness', 'ao', 'material', 'topdown', 'gradient'] as const;
 export type DebugView = (typeof DEBUG_VIEWS)[number];
 
 /** Spline control points; a helper so config stays plain mutable data with a precise type. */
@@ -189,6 +192,23 @@ export const config = {
     verifyMaxDistance: 200,
     /** Step cap for the verify tool: high enough that no ray is cut short. */
     verifyMaxSteps: 4096,
+  },
+  textures: {
+    /** Texels per block face: 16, 32, 64, 128 or 256 ("Ultra"). Needs `npm run textures`. */
+    resolution: 128 as TextureResolution,
+    /** Added to the ray-cone texture LOD (positive = blurrier, less shimmer). */
+    lodBias: 0,
+    /** Sampler anisotropy (1 = off). */
+    maxAnisotropy: 8,
+    /** Parallax occlusion mapping for materials that enable it (cobblestone, gravel, dirt). */
+    pom: true,
+    /** POM depth in blocks. */
+    pomDepth: 0.06,
+    pomSteps: 12,
+    /** Beyond this distance (blocks) parallax is sub-pixel and skipped. */
+    pomMaxDistance: 32,
+    /** Opacity below which alpha-tested texels (leaves) let rays through. */
+    alphaCutoff: 0.5,
   },
   input: {
     /** Radians per pixel of mouse movement. */

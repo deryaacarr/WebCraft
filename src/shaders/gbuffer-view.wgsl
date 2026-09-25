@@ -23,13 +23,16 @@ const MODE_NORMAL: u32 = 2u;
 const MODE_DEPTH: u32 = 3u;
 const MODE_STEPS: u32 = 4u;
 const MODE_MOTION: u32 = 5u;
-const MODE_UV: u32 = 6u;
-const MODE_MATERIAL: u32 = 7u;
+const MODE_ROUGHNESS: u32 = 6u;
+const MODE_AO: u32 = 7u;
+const MODE_MATERIAL: u32 = 8u;
 
 // Placeholder lighting until the path tracer exists (linear colours).
 const SKY_ZENITH: vec3f = vec3f(0.18, 0.36, 0.75);
 const SKY_HORIZON: vec3f = vec3f(0.65, 0.75, 0.9);
 const AMBIENT: f32 = 0.3;
+/// Emission multiplier for the placeholder lit view.
+const EMISSION_GAIN: f32 = 4.0;
 
 override WORKGROUP_SIZE: u32 = 8u;
 
@@ -66,8 +69,11 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let depth = textureLoad(gdepth, px, 0).x;
   let motion = textureLoad(gmotion, px, 0).xy;
   let sky = gbIsSky(g.w);
-  let albedo = unpack4x8unorm(g.x).xyz;
+  let albedo_ao = unpack4x8unorm(g.x);
+  let albedo = albedo_ao.xyz;
+  let ao = albedo_ao.w;
   let n = octDecode(unpack2x16snorm(g.y));
+  let surface = unpack4x8unorm(g.z); // roughness, metalness, emission, subsurface
   let v = f32(gid.y) / f32(params.size.y);
 
   // `display` views show data directly (sRGB-encoded values); decode so the blit's
@@ -81,7 +87,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
       if (sky) {
         linear = mix(SKY_ZENITH, SKY_HORIZON, v);
       } else {
-        linear = albedo * (AMBIENT + (1.0 - AMBIENT) * max(dot(n, params.sun_dir), 0.0));
+        let diffuse = AMBIENT * ao + (1.0 - AMBIENT) * max(dot(n, params.sun_dir), 0.0);
+        linear = albedo * diffuse + albedo * surface.z * EMISSION_GAIN;
       }
     }
     case MODE_ALBEDO: {
@@ -100,8 +107,11 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     case MODE_MOTION: {
       display = vec3f(motion * params.motion_scale + 0.5, 0.5);
     }
-    case MODE_UV: {
-      display = select(vec3f(unpack2x16unorm(g.z), 0.0), vec3f(0.0), sky);
+    case MODE_ROUGHNESS: {
+      display = select(surface.xyz, vec3f(0.0), sky);
+    }
+    case MODE_AO: {
+      display = select(vec3f(ao), vec3f(0.0), sky);
     }
     case MODE_MATERIAL: {
       display = select(hashColor(gbMaterial(g.w) + 1u), vec3f(0.0), sky);

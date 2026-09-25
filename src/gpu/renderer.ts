@@ -1,9 +1,10 @@
 import { config, type DebugView } from '../config';
 import type { CameraFrame, FlyCamera } from '../player/camera';
 import type { GpuBrickmap } from './brickmap';
+import type { MaterialSystem } from './materials';
 import { CanvasSize } from './canvas-size';
 import type { GpuContext } from './device';
-import { GBuffer } from './gbuffer';
+import { GB_STEPS_BITS, GB_STEPS_MAX, GB_STEPS_SHIFT, GBuffer } from './gbuffer';
 import { BlitPass } from './passes/blit-pass';
 import { GBufferViewPass } from './passes/gbuffer-view-pass';
 import { GradientPass } from './passes/gradient-pass';
@@ -35,12 +36,13 @@ export class Renderer {
     private readonly gpu: GpuContext,
     canvas: HTMLCanvasElement,
     brickmap: GpuBrickmap,
+    materials: MaterialSystem,
   ) {
     const { device } = gpu;
     this.profiler = new GpuProfiler(device, gpu.timestampQuery);
     this.size = new CanvasSize(canvas, device.limits.maxTextureDimension2D);
     this.gbuffer = new GBuffer(device);
-    const primary = new PrimaryPass(device, brickmap, this.gbuffer);
+    const primary = new PrimaryPass(device, brickmap, this.gbuffer, materials);
     this.primary = primary;
     const view = new GBufferViewPass(device, this.gbuffer);
     const topdown = new TopdownPass(device, brickmap);
@@ -159,11 +161,11 @@ export class Renderer {
     device.queue.submit([encoder.finish()]);
     await buf.mapAsync(GPUMapMode.READ);
     const words = new Uint32Array(buf.getMappedRange());
-    const histogram = new Uint32Array(0x800);
+    const histogram = new Uint32Array(GB_STEPS_MAX + 1);
     let sum = 0;
     for (let y = 0; y < g.height; y++) {
       for (let x = 0; x < g.width; x++) {
-        const steps = (words[(y * row) / 4 + x * 4 + 3]! >>> 20) & 0x7ff; // gbuffer.wgsl bits 20-30
+        const steps = (words[(y * row) / 4 + x * 4 + 3]! >>> GB_STEPS_SHIFT) & GB_STEPS_MAX;
         histogram[steps]!++;
         sum += steps;
       }
@@ -204,7 +206,6 @@ export class Renderer {
     });
     await Promise.all(runs.flatMap((r) => [r.g.mapAsync(GPUMapMode.READ), r.d.mapAsync(GPUMapMode.READ)]));
     const [a, b] = runs.map((r) => ({ g: new Uint32Array(r.g.getMappedRange()), d: new Float32Array(r.d.getMappedRange()) }));
-    const STEPS_BITS = 0x7ff << 20; // gbuffer.wgsl: bits 20-30 hold the step count
     let mismatches = 0;
     let first: string | undefined;
     for (let y = 0; y < height; y++) {
@@ -215,7 +216,7 @@ export class Renderer {
           a!.g[gi] === b!.g[gi] &&
           a!.g[gi + 1] === b!.g[gi + 1] &&
           a!.g[gi + 2] === b!.g[gi + 2] &&
-          (a!.g[gi + 3]! & ~STEPS_BITS) === (b!.g[gi + 3]! & ~STEPS_BITS) &&
+          (a!.g[gi + 3]! & ~GB_STEPS_BITS) === (b!.g[gi + 3]! & ~GB_STEPS_BITS) &&
           a!.d[di] === b!.d[di];
         if (!same) {
           mismatches++;

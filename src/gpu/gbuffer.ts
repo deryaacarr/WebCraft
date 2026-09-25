@@ -1,3 +1,8 @@
+/** Bit layout of gbuffer0.w (mirrors gbuffer.wgsl). */
+export const GB_STEPS_SHIFT = 19;
+export const GB_STEPS_MAX = 0xfff;
+export const GB_STEPS_BITS = GB_STEPS_MAX << GB_STEPS_SHIFT;
+
 /**
  * G-buffer written by the primary ray pass (layout documented in gbuffer.wgsl).
  * Three storage textures stay within the default limit of 4 per shader stage.
