@@ -39,8 +39,8 @@ export const config = {
     /** Internal (traced) resolution relative to the canvas backing size, upscaled in the
      *  blit pass. 0.5 on a Retina canvas ≈ 1440×800 primary rays. */
     renderScale: 0.5,
-    /** Tone mapper for the lit view (AgX base / AgX punchy look / ACES fit). */
-    tonemapper: 'agx-punchy' as 'agx' | 'agx-punchy' | 'aces',
+    /** Tone mapper for the lit view (ACES fit = the stage 7 reference look; AgX options). */
+    tonemapper: 'aces' as 'agx' | 'agx-punchy' | 'aces',
     /** AgX punchy look, applied in AgX log space: contrast power and saturation. */
     agxPunchyContrast: 1.15,
     agxPunchySaturation: 1.1,
@@ -229,31 +229,12 @@ export const config = {
     pomMaxDistance: 32,
     /** Opacity below which alpha-tested texels (leaves) let rays through. */
     alphaCutoff: 0.5,
-    /**
-     * Physical albedo calibration used by `npm run textures:build`: each material's mean
-     * linear luminance (opacity-weighted) is scaled to this value. Real-world references:
-     * grass ~0.20, soil ~0.15, rock 0.25–0.35, sand ~0.40, snow ~0.80. `null` = keep
-     * (emissive / special materials). There is no snow block yet; 0.8 is the target once
-     * one exists.
-     */
-    albedoTargets: {
-      grass_top: 0.2,
-      grass_side: 0.17,
-      dirt: 0.15,
-      stone: 0.22,
-      cobblestone: 0.28,
-      gravel: 0.28,
-      sand: 0.4,
-      water: 0.06,
-      oak_log_top: 0.3,
-      oak_log_side: 0.15,
-      oak_leaves: 0.15,
-      oak_planks: 0.35,
-      glass: 0.7,
-      torch: null,
-      lava: null,
-      snow: 0.8,
-    } as Record<string, number | null>,
+    /** Texture variants are chosen per block from a low-frequency world-space noise, so
+     *  equal-toned variants form regions and veins instead of a checkerboard. Feature
+     *  size in blocks (0 = independent random choice per block and face). */
+    variantRegionScale: 24,
+    /** Domain warp of the region noise (in feature sizes): bends regions into veins. */
+    variantWarp: 0.6,
   },
   sky: {
     /** Time of day at start (hours, 12 = solar noon). */
@@ -283,7 +264,8 @@ export const config = {
     /** Aerial perspective LUT (Hillaire 2020 §5.5): camera-aligned froxels holding the
      *  in-scattered light and transmittance between the camera and each depth slice. */
     aerialPerspective: {
-      enabled: true,
+      /** Off by default: the stage 7 reference look (docs/sky-*.png at 4b24741) has none. */
+      enabled: false,
       /** Froxel grid: screen resolution (x = y) and depth slices. */
       resolution: 32,
       slices: 32,
@@ -299,8 +281,9 @@ export const config = {
       rayleighScattering: [5.802e-3, 13.558e-3, 33.1e-3] as [number, number, number],
       rayleighScaleHeight: 8,
       mieScattering: 3.996e-3,
-      /** Hillaire: Mie extinction 4.44e-3 = scattering 3.996e-3 + absorption 0.444e-3. */
-      mieAbsorption: 0.444e-3,
+      /** Stage 7 reference value (Hillaire's own split would be 0.444e-3: extinction
+       *  4.44e-3 = scattering 3.996e-3 + absorption); changing it changes the sky's look. */
+      mieAbsorption: 4.4e-3,
       mieScaleHeight: 1.2,
       mieG: 0.8,
       ozoneAbsorption: [0.65e-3, 1.881e-3, 0.085e-3] as [number, number, number],
@@ -309,7 +292,7 @@ export const config = {
       /** Low haze layer (boundary-layer aerosols over humid mountain forest): meteorological
        *  visibility at the planet surface (km, 0 = none), scale height (km) and
        *  single-scattering albedo. Clear-air aerosols above alone give ~100 km+. */
-      hazeVisibilityKm: 8,
+      hazeVisibilityKm: 0,
       hazeScaleHeight: 0.5,
       hazeAlbedo: 0.9,
       /** Planet surface beyond the loaded world (forest-like, linear RGB). */
@@ -359,7 +342,7 @@ export const config = {
   },
   exposure: {
     /** Target mid-grey after exposure. */
-    key: 0.15,
+    key: 0.18,
     /** Manual correction in EV (stops). */
     compensation: 0,
     /** Adaptation time constants (s): scene getting darker (eyes open up) / brighter. */
@@ -367,17 +350,18 @@ export const config = {
     adaptBrighterSeconds: 0.5,
     /** Metering: drop this fraction of the weight at each end of the histogram. */
     trim: 0.05,
-    /** Centre weighting: Gaussian sigma as a fraction of the half screen. */
-    centerSigma: 0.45,
-    /** Sky pixels count this much relative to ground (≈ excluded). */
-    skyWeight: 0.02,
+    /** Centre weighting: Gaussian sigma as a fraction of the half screen (0 = uniform,
+     *  like the stage 7 reference). */
+    centerSigma: 0,
+    /** Sky pixels count this much relative to ground (1 = like the stage 7 reference). */
+    skyWeight: 1,
     /** Exposure limits as log2 multipliers of the lighting unit. */
     minEv: -2,
     maxEv: 16,
   },
   whiteBalance: {
     /** 'auto': neutralise the scene light like a camera; 'manual': fixed temperature. */
-    mode: 'auto' as 'auto' | 'manual' | 'off',
+    mode: 'off' as 'auto' | 'manual' | 'off',
     /** Manual white point (K). 6500 = neutral daylight. */
     temperature: 6500,
     /** Fraction of the cast removed (1 = fully neutral). < 1 keeps sunsets warm, nights blue. */

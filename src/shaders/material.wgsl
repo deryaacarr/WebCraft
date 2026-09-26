@@ -21,7 +21,13 @@ struct MaterialParams {
   texture_size: f32,
   /// Parallax is skipped beyond this distance (sub-pixel there anyway).
   pom_max_distance: f32,
-  _pad: f32,
+  /// Variant regions: world-space noise feature size (blocks; 0 = random per block) and
+  /// domain warp (in feature sizes).
+  variant_scale: f32,
+  variant_warp: f32,
+  _pad0: f32,
+  _pad1: f32,
+  _pad2: f32,
 };
 
 /// Per material: first texture layer, number of variants, flags.
@@ -80,6 +86,37 @@ fn hashCellFace(c: vec3i, face: u32) -> u32 {
   return h;
 }
 
+fn hash3(c: vec3i) -> f32 {
+  return f32(hashCellFace(c, 7u) >> 8u) / 16777216.0;
+}
+
+/// Smooth 3D value noise in [0, 1].
+fn valueNoise(p: vec3f) -> f32 {
+  let i = vec3i(floor(p));
+  let f = fract(p);
+  let u = f * f * (3.0 - 2.0 * f);
+  let x00 = mix(hash3(i), hash3(i + vec3i(1, 0, 0)), u.x);
+  let x10 = mix(hash3(i + vec3i(0, 1, 0)), hash3(i + vec3i(1, 1, 0)), u.x);
+  let x01 = mix(hash3(i + vec3i(0, 0, 1)), hash3(i + vec3i(1, 0, 1)), u.x);
+  let x11 = mix(hash3(i + vec3i(0, 1, 1)), hash3(i + vec3i(1, 1, 1)), u.x);
+  return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
+}
+
+/// Variant index from a low-frequency, domain-warped world-space noise sampled at the
+/// block centre: equal variants cluster into regions and veins (all faces of a block
+/// agree). Each material gets its own pattern. Not used for alpha-tested materials: their
+/// mapping is evaluated inside ray traversal (alpha tests), where it must stay cheap.
+fn regionVariant(cell: vec3i, material: u32, count: u32) -> u32 {
+  let p = (vec3f(cell) + 0.5) / material_params.variant_scale + f32(material) * 17.31;
+  // One warp sample bent along a fixed skew axis: cheap, still turns blobs into veins.
+  let warp = valueNoise(p * 0.5 + 31.7) - 0.5;
+  let q = p + vec3f(0.8, 0.5, -0.6) * (warp * 2.0 * material_params.variant_warp);
+  let n = valueNoise(q) * 0.7 + valueNoise(q * 2.3 + 5.1) * 0.3;
+  // Value noise clusters around 0.5: stretch so every variant gets a fair share.
+  let v = clamp((n - 0.5) * 2.2 + 0.5, 0.0, 0.9999);
+  return u32(v * f32(count));
+}
+
 /// Where and how a voxel face samples its material.
 struct FaceMapping {
   layer: u32,
@@ -99,7 +136,12 @@ fn faceMapping(material: u32, cell: vec3i, face: u32, local: vec3f) -> FaceMappi
   let frame = faceFrame(face);
   let h = hashCellFace(cell, face);
   var m: FaceMapping;
-  m.layer = info.first_layer + h % max(info.variants, 1u);
+  let count = max(info.variants, 1u);
+  var variant = h % count;
+  if (material_params.variant_scale > 0.0 && count > 1u && (info.flags & MATERIAL_ALPHA_TEST) == 0u) {
+    variant = regionVariant(cell, material, count);
+  }
+  m.layer = info.first_layer + variant;
   m.flags = info.flags;
   m.n = frame.n;
   let p = local - 0.5;

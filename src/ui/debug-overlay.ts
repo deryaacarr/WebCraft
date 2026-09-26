@@ -268,7 +268,7 @@ export class DebugOverlay {
     f.add(e, 'compensation', -5, 5, 0.1).name('exposure compensation (EV)');
     f.add(e, 'adaptDarkerSeconds', 0.1, 10, 0.1).name('adapt to dark (s)');
     f.add(e, 'adaptBrighterSeconds', 0.1, 10, 0.1).name('adapt to bright (s)');
-    f.add(e, 'centerSigma', 0.1, 2, 0.05).name('metering centre weight σ');
+    f.add(e, 'centerSigma', 0, 2, 0.05).name('metering centre weight σ (0 = off)');
     f.add(wb, 'mode', { 'auto white balance': 'auto', manual: 'manual', off: 'off' }).name('white balance');
     f.add(wb, 'temperature', 2000, 12000, 100).name('manual temperature (K)');
     f.add(wb, 'strength', 0, 1, 0.05).name('auto WB strength');
@@ -368,6 +368,8 @@ export class DebugOverlay {
     f.add(t, 'pomSteps', 2, 32, 1).name('POM steps');
     f.add(t, 'pomMaxDistance', 4, 128, 1).name('POM max distance');
     f.add(t, 'alphaCutoff', 0.05, 0.95, 0.05).name('leaf alpha cutoff');
+    f.add(t, 'variantRegionScale', 0, 128, 1).name('variant region size (0 = per block)');
+    f.add(t, 'variantWarp', 0, 2, 0.05).name('variant region warp');
     f.add(v, 'source').name('textures').disable().listen();
     f.add(v, 'memoryMB').name('texture memory (MB)').disable().listen();
     f.add(v, 'probe').name('albedo at screen centre').disable().listen();

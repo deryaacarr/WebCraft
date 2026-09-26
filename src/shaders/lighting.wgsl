@@ -143,8 +143,6 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let e_bounce = params.bounce_albedo * (lighting.light_illuminance * max(l.y, 0.0) + e_sky);
   let bounce_weight = mix(1.0 - facing, 1.0, params.bounce_isotropic);
   color += diffuse_color / PI * (e_sky * facing * sky_vis + e_bounce * bounce_weight * sky_vis) * ao;
-  // Leaves also let some sky light through from the other side.
-  color += diffuse_color * surf.w * params.subsurface * e_sky * sky_vis * 0.5 / PI;
   // Specular sky reflection (unshadowed beyond sky visibility; no GI yet).
   let r = reflect(view, n);
   color += f * skyScattering(r) * vis.y * (1.0 - roughness);

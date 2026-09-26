@@ -22,7 +22,7 @@ struct ExposureParams {
   /// Adaptation time constants (s): scene getting darker / brighter.
   tau_darker: f32,
   tau_brighter: f32,
-  /// Gaussian centre weighting: sigma as a fraction of the half screen size.
+  /// Gaussian centre weighting: sigma as a fraction of the half screen size (0 = uniform).
   center_sigma: f32,
   /// Weight of sky pixels relative to ground (≈ excluded).
   sky_weight: f32,
@@ -97,7 +97,10 @@ fn main(@builtin(local_invocation_index) i: u32) {
     let c = textureLoad(hdr, vec2i(cell * size), 0).rgb;
     let lum = max(dot(c, vec3f(0.2126, 0.7152, 0.0722)), 1e-9);
     let d = (cell - 0.5) * 2.0;
-    var w = exp(-dot(d, d) / (2.0 * params.center_sigma * params.center_sigma));
+    var w = 1.0;
+    if (params.center_sigma > 0.0) {
+      w = exp(-dot(d, d) / (2.0 * params.center_sigma * params.center_sigma));
+    }
     if (gbIsSky(textureLoad(gbuffer0, vec2i(cell * gsize), 0).w)) {
       w *= params.sky_weight;
     }

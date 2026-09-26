@@ -25,7 +25,7 @@ const FLAG_ROTATE = 1;
 const FLAG_POM = 2;
 const FLAG_ALPHA_TEST = 4;
 // MaterialParams in material.wgsl: 7 scalars + pad → 32 bytes.
-const PARAMS_SIZE = 32;
+const PARAMS_SIZE = 48;
 const TEXTURE_BASE = `${import.meta.env.BASE_URL}textures/`;
 
 /** Layer data for all materials at one resolution: [kind][layer][texel RGBA8]. */
@@ -125,6 +125,8 @@ export class MaterialSystem {
     f32[4] = t.alphaCutoff;
     f32[5] = this.current.resolution;
     f32[6] = t.pomMaxDistance;
+    f32[7] = t.variantRegionScale;
+    f32[8] = t.variantWarp;
     this.device.queue.writeBuffer(this.params, 0, this.paramData);
   }
 

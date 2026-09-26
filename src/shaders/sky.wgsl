@@ -70,11 +70,7 @@ fn skyViewSample(dir: vec3f, light: vec3f, layer: u32) -> vec3f {
   let lh = light.xz;
   let lv = length(vh) * length(lh);
   let cos_az = select(1.0, dot(vh, lh) / lv, lv > 1e-6);
-  var uv = skyViewUv(atm, sky.viewer_r, dir.y, acos(clamp(cos_az, -1.0, 1.0)));
-  // Below the horizon lies the planet beyond the loaded world. Instead of showing that
-  // flat ground, every such direction reads the horizon row (half a texel above it): the
-  // limit of aerial perspective at great distance, so the world edge melts into the haze.
-  uv.y = min(uv.y, 0.5 - 0.5 / f32(textureDimensions(skyview_tex).y));
+  let uv = skyViewUv(atm, sky.viewer_r, dir.y, acos(clamp(cos_az, -1.0, 1.0)));
   return textureSampleLevel(skyview_tex, sky_sampler, uv, layer, 0.0).rgb;
 }
 

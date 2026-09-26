@@ -31,7 +31,6 @@ import {
   type FloatImage,
   type Sprite,
 } from './lib/image-ops.ts';
-import { config } from '../src/config.ts';
 import {
   TEXTURE_RESOLUTIONS,
   TEXTURE_SPEC,
@@ -339,68 +338,6 @@ async function buildVariant(v: VariantSource): Promise<Layer> {
   }
 }
 
-/**
- * Pulls the variants of one material towards a common average colour (multiplicatively,
- * in linear light, alpha-weighted), so neighbouring voxels using different variants do
- * not look patchy. Detail and contrast inside each texture are kept.
- */
-function matchTones(variants: Layer[], strength = 0.85): void {
-  if (variants.length < 2) return;
-  const toLin = toLinear;
-  const means = variants.map((v) => {
-    const m = [0, 0, 0];
-    let w = 0;
-    for (let i = 0; i < WORK * WORK; i++) {
-      const a = v.color.data[i * 4 + 3]!;
-      for (let k = 0; k < 3; k++) m[k]! += toLin(v.color.data[i * 4 + k]!) * a;
-      w += a;
-    }
-    return m.map((x) => x / w);
-  });
-  const target = [0, 1, 2].map((k) => means.reduce((s, m) => s + m[k]!, 0) / means.length);
-  variants.forEach((v, j) => {
-    const gain = [0, 1, 2].map((k) => (target[k]! / means[j]![k]!) ** strength);
-    for (let i = 0; i < WORK * WORK; i++) {
-      for (let k = 0; k < 3; k++) {
-        v.color.data[i * 4 + k] = toSrgb(Math.min(1, toLin(v.color.data[i * 4 + k]!) * gain[k]!));
-      }
-    }
-  });
-}
-
-const toLinear = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
-const toSrgb = (c: number) => (c <= 0.0031308 ? c * 12.92 : 1.055 * c ** (1 / 2.4) - 0.055);
-
-/** Opacity-weighted mean linear luminance of a set of variants. */
-function meanAlbedo(variants: Layer[]): number {
-  let sum = 0;
-  let weight = 0;
-  for (const v of variants) {
-    for (let i = 0; i < WORK * WORK; i++) {
-      const a = v.color.data[i * 4 + 3]!;
-      const c = v.color.data;
-      sum += a * (0.2126 * toLinear(c[i * 4]!) + 0.7152 * toLinear(c[i * 4 + 1]!) + 0.0722 * toLinear(c[i * 4 + 2]!));
-      weight += a;
-    }
-  }
-  return sum / Math.max(weight, 1e-6);
-}
-
-/**
- * Scales linear RGB so the material's mean luminance matches its physical target
- * (config.textures.albedoTargets). Two passes, since clamping at 1 can undershoot.
- */
-function calibrateAlbedo(variants: Layer[], target: number): void {
-  for (let pass = 0; pass < 2; pass++) {
-    const gain = target / Math.max(meanAlbedo(variants), 1e-6);
-    for (const v of variants) {
-      for (let i = 0; i < WORK * WORK; i++) {
-        for (let k = 0; k < 3; k++) v.color.data[i * 4 + k] = toSrgb(Math.min(1, toLinear(v.color.data[i * 4 + k]!) * gain));
-      }
-    }
-  }
-}
-
 /** The three RGBA8 layers at working resolution. */
 function encode(layer: Layer): Record<(typeof KINDS)[number], Uint8Array> {
   const N = WORK * WORK;
@@ -454,7 +391,6 @@ async function main(): Promise<void> {
   const t0 = performance.now();
   const layers: { material: string; variant: number; source: string; data: ReturnType<typeof encode> }[] = [];
   const materials: Record<string, { firstLayer: number; count: number; rotate: boolean; pom: boolean; alphaTest: boolean }> = {};
-  const albedo: Record<string, number> = {};
   for (const [material, spec] of Object.entries(TEXTURE_SPEC)) {
     materials[material] = { firstLayer: layers.length, count: spec.variants.length, rotate: spec.rotate, pom: spec.pom, alphaTest: spec.alphaTest };
     const built: Layer[] = [];
@@ -463,15 +399,10 @@ async function main(): Promise<void> {
       labels.push(v.kind === 'ambientcg' ? v.id : v.kind === 'procedural' ? `procedural:${v.generator}` : v.kind);
       built.push(await buildVariant(v));
     }
-    matchTones(built);
-    const target = config.textures.albedoTargets[material];
-    const before = meanAlbedo(built);
-    if (target != null) calibrateAlbedo(built, target);
-    const after = meanAlbedo(built);
-    albedo[material] = after;
+    // No tone matching: each variant keeps its source colours (world-space regions in
+    // material.wgsl keep equal-toned variants together, so this does not look patchy).
     built.forEach((layer, i) => layers.push({ material, variant: i, source: labels[i]!, data: encode(layer) }));
-    const note = target != null ? `albedo ${before.toFixed(3)} → ${after.toFixed(3)} (target ${target})` : `albedo ${after.toFixed(3)} (kept)`;
-    console.log(`  ${material.padEnd(13)} ${note}  [${labels.join(', ')}]`);
+    console.log(`  ${material}: ${labels.join(', ')}`);
   }
 
   mkdirSync(OUT, { recursive: true });
@@ -495,8 +426,6 @@ async function main(): Promise<void> {
     kinds: KINDS,
     layers: layers.map(({ material, variant, source }) => ({ material, variant, source })),
     materials,
-    /** Mean linear albedo per material after calibration (opacity-weighted). */
-    albedo,
     packs,
   };
   writeFileSync(join(OUT, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
