@@ -8,6 +8,7 @@ import { DEBUG_VIEWS, type DebugView } from '../config';
  *   &wg=16x8                     primary-ray workgroup size (benchmarking)
  *   &tile=4                      depth prepass tile edge (benchmarking)
  *   &dmax=8                      distance field max distance (benchmarking)
+ *   &time=18.5                   time of day in hours; also pauses the clock
  */
 export interface UrlOverrides {
   camera?: { position: [number, number, number]; yawDeg: number; pitchDeg: number };
@@ -16,6 +17,7 @@ export interface UrlOverrides {
   workgroup?: [number, number];
   prepassTile?: number;
   distanceMax?: number;
+  timeOfDay?: number;
 }
 
 export function parseUrlOverrides(search: string): UrlOverrides {
@@ -38,6 +40,8 @@ export function parseUrlOverrides(search: string): UrlOverrides {
   };
   const tile = positiveInt('tile');
   if (tile) out.prepassTile = tile;
+  const time = Number(params.get('time'));
+  if (params.has('time') && Number.isFinite(time)) out.timeOfDay = ((time % 24) + 24) % 24;
   const dmax = positiveInt('dmax');
   if (dmax) out.distanceMax = Math.min(dmax, 254);
 

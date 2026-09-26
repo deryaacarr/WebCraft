@@ -10,6 +10,11 @@ describe('parseUrlOverrides', () => {
     });
   });
 
+  it('parses and wraps the time of day', () => {
+    expect(parseUrlOverrides('?time=18.5').timeOfDay).toBe(18.5);
+    expect(parseUrlOverrides('?time=-1').timeOfDay).toBe(23);
+  });
+
   it('ignores malformed values', () => {
     expect(parseUrlOverrides('?cam=1,2,x,4,5&view=nope&scale=-1')).toEqual({});
   });

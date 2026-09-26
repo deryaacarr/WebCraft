@@ -5,7 +5,21 @@
 export const TEXTURE_RESOLUTIONS = [16, 32, 64, 128, 256] as const;
 export type TextureResolution = (typeof TEXTURE_RESOLUTIONS)[number];
 
-export const DEBUG_VIEWS = ['lit', 'albedo', 'normal', 'depth', 'steps', 'motion', 'roughness', 'ao', 'material', 'topdown', 'gradient'] as const;
+export const DEBUG_VIEWS = [
+  'lit',
+  'albedo',
+  'normal',
+  'depth',
+  'steps',
+  'motion',
+  'roughness',
+  'ao',
+  'material',
+  'shadow',
+  'skyvis',
+  'topdown',
+  'gradient',
+] as const;
 export type DebugView = (typeof DEBUG_VIEWS)[number];
 
 /** Spline control points; a helper so config stays plain mutable data with a precise type. */
@@ -209,6 +223,78 @@ export const config = {
     pomMaxDistance: 32,
     /** Opacity below which alpha-tested texels (leaves) let rays through. */
     alphaCutoff: 0.5,
+  },
+  sky: {
+    /** Time of day at start (hours, 12 = solar noon). */
+    timeOfDay: 9.5,
+    /** Day of the lunar cycle at start (≈ 7 = first quarter, 14.8 = full moon). */
+    startDay: 10,
+    /** Real-time minutes for one full in-game day (0 = time stands still). */
+    dayLengthMinutes: 20,
+    paused: false,
+    /** Observer latitude (degrees) and season (sun declination, degrees). */
+    latitude: 45,
+    sunDeclination: 15,
+    /** Tilt of the moon's path against the sun's (degrees). */
+    moonInclination: 5.1,
+    /** Sun illuminance at the top of the atmosphere; the unit of all lighting. */
+    sunIlluminance: 1,
+    /** Visible (and soft-shadow) angular radii, degrees. The real sun is 0.27°. */
+    sunAngularRadius: 0.3,
+    moonAngularRadius: 0.26,
+    moonAlbedo: 0.12,
+    /** Moonlight is ~400 000× dimmer than sunlight; this lifts nights to a playable level. */
+    nightBoost: 60,
+    /** Star brightness relative to the sun (after the night boost). */
+    starBrightness: 0.004,
+    /** Viewer altitude above the planet surface at sea level (km); +1 m per block above. */
+    seaLevelAltitudeKm: 0.2,
+    /** Earth-like atmosphere (km⁻¹, km), Hillaire 2020 / Bruneton defaults. */
+    atmosphere: {
+      bottomRadius: 6360,
+      topRadius: 6460,
+      rayleighScattering: [5.802e-3, 13.558e-3, 33.1e-3] as [number, number, number],
+      rayleighScaleHeight: 8,
+      mieScattering: 3.996e-3,
+      mieAbsorption: 4.4e-3,
+      mieScaleHeight: 1.2,
+      mieG: 0.8,
+      ozoneAbsorption: [0.65e-3, 1.881e-3, 0.085e-3] as [number, number, number],
+      ozoneCenter: 25,
+      ozoneWidth: 30,
+      /** Planet surface beyond the loaded world (forest-like, linear RGB). */
+      groundAlbedo: [0.07, 0.09, 0.05] as [number, number, number],
+    },
+  },
+  lighting: {
+    /** Soft-shadow / sky-visibility history length (frames) for temporal accumulation. */
+    temporalFrames: 24,
+    /** Reject history when the reprojected depth differs by more than this fraction. */
+    temporalDepthTolerance: 0.05,
+    /** Trace visibility for one pixel of each 2×2 block per frame (rotating); the temporal
+     *  pass fills in the rest. ~4× cheaper; slightly slower to converge. */
+    visibilityCheckerboard: true,
+    /** Sky-visibility rays: max distance (blocks). Short = local occlusion only. */
+    skyVisibilityDistance: 12,
+    /** Step cap for sky-visibility rays (they only need local occlusion). */
+    skyVisibilitySteps: 64,
+    /** Shadow rays stop here (blocks). */
+    shadowDistance: 512,
+    /** Multiplier for emissive materials (torch, lava). */
+    emissiveStrength: 6,
+    /** Light passing through leaves (subsurface scattering approximation). */
+    subsurface: 0.5,
+  },
+  exposure: {
+    /** Target mid-grey after exposure. */
+    key: 0.18,
+    /** Manual correction in EV (stops). */
+    compensation: 0,
+    /** Adaptation speed (1/s): higher reacts faster. */
+    adaptationSpeed: 1.5,
+    /** Exposure limits as log2 multipliers of the lighting unit. */
+    minEv: -2,
+    maxEv: 16,
   },
   input: {
     /** Radians per pixel of mouse movement. */

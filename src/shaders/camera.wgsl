@@ -21,7 +21,16 @@ struct Camera {
   /// Depth prepass tile edge in pixels; 0 = prepass disabled.
   prepass_tile: u32,
   prepass_max_steps: u32,
+  /// Previous frame's forward axis (reprojected depth for temporal accumulation).
+  prev_forward: vec3f,
+  /// Increments every frame (noise seeds).
+  frame_index: u32,
 };
+
+/// World position of a G-buffer pixel relative to the camera, from its linear depth.
+fn viewRelativePosition(dir: vec3f, forward: vec3f, depth: f32) -> vec3f {
+  return dir * (depth / dot(dir, forward));
+}
 
 fn rayDir(inv_view_proj: mat4x4f, uv: vec2f) -> vec3f {
   // Any point on the ray through uv; the camera sits at the origin of this space.

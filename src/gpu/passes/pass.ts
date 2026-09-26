@@ -8,6 +8,8 @@ export interface FrameContext {
   profiler: Pick<GpuProfiler, 'timestampWrites'>;
   /** Seconds since start, interpolated to the render moment. */
   time: number;
+  /** Real seconds since the previous frame. */
+  dt: number;
   camera: CameraFrame;
 }
 

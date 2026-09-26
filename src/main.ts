@@ -1,6 +1,7 @@
 import { config } from './config';
 import { Input } from './core/input';
 import type { Vec3 } from './core/math';
+import { TimeOfDay } from './core/time-of-day';
 import { parseUrlOverrides } from './core/url-params';
 import { GameLoop } from './core/loop';
 import { initGpu, WebGPUUnsupportedError } from './gpu/device';
@@ -8,6 +9,7 @@ import { GpuBrickmap } from './gpu/brickmap';
 import { verifyBrickmap } from './gpu/brickmap-verify';
 import { verifyTrace } from './gpu/trace-verify';
 import { MaterialSystem } from './gpu/materials';
+import { SkySystem } from './gpu/sky';
 import { Renderer } from './gpu/renderer';
 import { FlyCamera } from './player/camera';
 import { DebugOverlay } from './ui/debug-overlay';
@@ -24,6 +26,10 @@ async function main(): Promise<void> {
   const overrides = parseUrlOverrides(location.search);
   if (overrides.view) config.debug.view = overrides.view;
   if (overrides.renderScale) config.render.renderScale = overrides.renderScale;
+  if (overrides.timeOfDay !== undefined) {
+    config.sky.timeOfDay = overrides.timeOfDay;
+    config.sky.paused = true;
+  }
   if (overrides.workgroup) config.trace.workgroup = overrides.workgroup;
   if (overrides.prepassTile) config.trace.prepassTile = overrides.prepassTile;
   if (overrides.distanceMax) config.trace.distanceMax = overrides.distanceMax;
@@ -34,7 +40,10 @@ async function main(): Promise<void> {
   await brickmap.init();
   const materials = new MaterialSystem(gpu.device);
   await materials.init();
-  const renderer = new Renderer(gpu, canvas, brickmap, materials);
+  const sky = new SkySystem(gpu.device);
+  await sky.init();
+  const clock = new TimeOfDay(config.sky.timeOfDay, config.sky.startDay);
+  const renderer = new Renderer(gpu, canvas, brickmap, materials, sky);
   await renderer.init();
 
   const world = new World();
@@ -72,7 +81,10 @@ async function main(): Promise<void> {
     onVerifyTrace: () => verifyTrace(gpu.device, brickmap, world, camera.position),
     cameraInfo: () => ({ position: camera.position, internal: renderer.internalSize }),
     onBenchmarkPrimary: () => renderer.benchmarkPrimary(config.debug.benchmarkIterations),
+    onBenchmarkLighting: () => renderer.benchmarkLighting(config.debug.benchmarkIterations),
     onVerifyPrepass: () => renderer.verifyPrepass(),
+    clock,
+    skyState: () => sky.state,
     materialStats: () => materials.stats,
     onTextureResolution: (res) => materials.load(res),
     onSamplerChange: () => materials.createSampler(),
@@ -91,6 +103,8 @@ async function main(): Promise<void> {
 
   const loop = new GameLoop({
     update: (dt) => {
+      const minutes = config.sky.dayLengthMinutes;
+      if (!config.sky.paused && minutes > 0) clock.advance((dt * 86400) / (minutes * 60));
       camera.update(dt, input);
       const [x, y, z] = camera.position;
       streamer.update(x, y, z);
@@ -99,6 +113,7 @@ async function main(): Promise<void> {
     render: (alpha, time) => {
       debug.beginFrame();
       brickmap.sync(world, camera.position[0], camera.position[2]);
+      sky.update(clock.state(config.sky), camera.position[1]);
       renderer.render(time, camera, alpha);
       debug.endFrame();
     },

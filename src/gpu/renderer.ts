@@ -2,6 +2,10 @@ import { config, type DebugView } from '../config';
 import type { CameraFrame, FlyCamera } from '../player/camera';
 import type { GpuBrickmap } from './brickmap';
 import type { MaterialSystem } from './materials';
+import { ExposurePass } from './passes/exposure-pass';
+import { LightingPass } from './passes/lighting-pass';
+import { VisibilityPass } from './passes/visibility-pass';
+import type { SkySystem } from './sky';
 import { CanvasSize } from './canvas-size';
 import type { GpuContext } from './device';
 import { GB_STEPS_BITS, GB_STEPS_MAX, GB_STEPS_SHIFT, GBuffer } from './gbuffer';
@@ -17,14 +21,23 @@ import { GpuProfiler } from './profiler';
 interface SceneChain {
   passes: RenderPass[];
   output: () => GPUTexture | null;
+  /** Output is pre-exposed HDR: tone map it (otherwise it is shown as is). */
+  tonemap: boolean;
+  /** Needs this frame's sky LUTs / lighting summary. */
+  sky: boolean;
 }
+
+type ChainName = 'lit' | 'visibility' | 'gbuffer' | 'topdown' | 'gradient';
 
 /** Owns the pass chains: scene passes at internal resolution → blit to canvas. */
 export class Renderer {
   readonly profiler: GpuProfiler;
   readonly size: CanvasSize;
   readonly gbuffer: GBuffer;
-  private readonly chains: { gbuffer: SceneChain; topdown: SceneChain; gradient: SceneChain };
+  private readonly chains: Record<ChainName, SceneChain>;
+  private readonly lighting: LightingPass;
+  private readonly visibility: VisibilityPass;
+  private lastTime: number | null = null;
   private readonly allPasses: RenderPass[];
   private readonly blit: BlitPass;
   private resolutionDirty = true;
@@ -37,6 +50,7 @@ export class Renderer {
     canvas: HTMLCanvasElement,
     brickmap: GpuBrickmap,
     materials: MaterialSystem,
+    private readonly sky: SkySystem,
   ) {
     const { device } = gpu;
     this.profiler = new GpuProfiler(device, gpu.timestampQuery);
@@ -44,15 +58,25 @@ export class Renderer {
     this.gbuffer = new GBuffer(device);
     const primary = new PrimaryPass(device, brickmap, this.gbuffer, materials);
     this.primary = primary;
+    const camera = () => primary.camera;
+    const visibility = new VisibilityPass(device, this.gbuffer, camera, brickmap, materials, sky);
+    const lighting = new LightingPass(device, this.gbuffer, camera, visibility, sky);
+    this.visibility = visibility;
+    this.lighting = lighting;
+    const exposure = new ExposurePass(device, () => lighting.output, sky);
     const view = new GBufferViewPass(device, this.gbuffer);
     const topdown = new TopdownPass(device, brickmap);
     const gradient = new GradientPass(device);
+    const out = (p: { output: GPUTexture | null }) => () => p.output;
     this.chains = {
-      gbuffer: { passes: [primary, view], output: () => view.output },
-      topdown: { passes: [topdown], output: () => topdown.output },
-      gradient: { passes: [gradient], output: () => gradient.output },
+      lit: { passes: [primary, visibility, lighting, exposure], output: out(lighting), tonemap: true, sky: true },
+      visibility: { passes: [primary, visibility, lighting], output: out(lighting), tonemap: false, sky: true },
+      gbuffer: { passes: [primary, view], output: out(view), tonemap: false, sky: false },
+      topdown: { passes: [topdown], output: out(topdown), tonemap: false, sky: false },
+      gradient: { passes: [gradient], output: out(gradient), tonemap: false, sky: false },
     };
-    this.allPasses = [primary, view, topdown, gradient];
+    // Resize order matters: the G-buffer consumers after the passes they read from.
+    this.allPasses = [primary, visibility, lighting, exposure, view, topdown, gradient];
     this.blit = new BlitPass(device, gpu.context, gpu.format);
   }
 
@@ -73,7 +97,10 @@ export class Renderer {
 
   render(time: number, camera: FlyCamera, alpha: number): void {
     if (this.size.apply() || this.resolutionDirty) this.resizeTargets();
-    const chain = this.chainFor(config.debug.view);
+    const view = config.debug.view;
+    const chain = this.chainFor(view);
+    this.lighting.mode = view === 'shadow' || view === 'skyvis' ? view : 'lit';
+    this.blit.setTonemap(chain.tonemap);
     const output = chain.output();
     if (output !== this.boundOutput && output) {
       this.blit.setSource(output);
@@ -84,9 +111,12 @@ export class Renderer {
     const encoder = device.createCommandEncoder({ label: 'frame' });
     const frame = camera.frame(alpha, this.gbuffer.width, this.gbuffer.height);
     this.lastCamera = frame;
-    const ctx: FrameContext = { encoder, profiler: this.profiler, time, camera: frame };
+    const dt = this.lastTime === null ? 0 : Math.max(0, time - this.lastTime);
+    this.lastTime = time;
+    const ctx: FrameContext = { encoder, profiler: this.profiler, time, dt, camera: frame };
 
     this.profiler.beginFrame();
+    if (chain.sky) this.sky.encode(encoder);
     for (const pass of chain.passes) pass.execute(ctx);
     this.blit.execute(ctx);
     this.profiler.resolve(encoder);
@@ -102,6 +132,24 @@ export class Renderer {
    * does not pick up waits on neighbouring passes.
    */
   async benchmarkPrimary(iterations: number): Promise<{ gpuMs: number | null; wallMs: number; avgSteps: number; p95Steps: number }> {
+    const timing = await this.benchmarkPasses([this.primary], iterations);
+    return { ...timing, ...(await this.stepStats()) };
+  }
+
+  /** Times the lighting passes after primary (visibility rays + accumulation, shading). */
+  async benchmarkLighting(iterations: number): Promise<{ visibilityMs: number | null; lightingMs: number | null }> {
+    const [vis, light] = [this.visibility, this.lighting];
+    return {
+      visibilityMs: (await this.benchmarkPasses([vis], iterations)).gpuMs,
+      lightingMs: (await this.benchmarkPasses([light], iterations)).gpuMs,
+    };
+  }
+
+  /**
+   * Runs `passes` `iterations` times back to back (same camera as the last frame) and
+   * reports the time per iteration, from timestamps around the batch and wall clock.
+   */
+  private async benchmarkPasses(passes: RenderPass[], iterations: number): Promise<{ gpuMs: number | null; wallMs: number }> {
     const camera = this.lastCamera;
     if (!camera) throw new Error('no frame rendered yet');
     const { device } = this.gpu;
@@ -112,17 +160,18 @@ export class Renderer {
     const profiler = {
       timestampWrites: () => {
         const i = pass++;
-        if (!querySet || (i !== 0 && i !== iterations - 1)) return undefined;
+        const last = iterations * passes.length - 1;
+        if (!querySet || (i !== 0 && i !== last)) return undefined;
         return {
           querySet,
           ...(i === 0 && { beginningOfPassWriteIndex: 0 }),
-          ...(i === iterations - 1 && { endOfPassWriteIndex: 1 }),
+          ...(i === last && { endOfPassWriteIndex: 1 }),
         };
       },
     };
     const encoder = device.createCommandEncoder({ label: 'benchmark-primary' });
-    const ctx: FrameContext = { encoder, profiler, time: 0, camera };
-    for (let i = 0; i < iterations; i++) this.primary.execute(ctx);
+    const ctx: FrameContext = { encoder, profiler, time: 0, dt: 0, camera };
+    for (let i = 0; i < iterations; i++) for (const pass of passes) pass.execute(ctx);
 
     let resolve: GPUBuffer | null = null;
     let read: GPUBuffer | null = null;
@@ -146,7 +195,7 @@ export class Renderer {
     }
     for (const b of [resolve, read]) b?.destroy();
     querySet?.destroy();
-    return { gpuMs, wallMs, ...(await this.stepStats()) };
+    return { gpuMs, wallMs };
   }
 
   /** Mean and 95th percentile of the DDA step count stored in the G-buffer. */
@@ -199,7 +248,7 @@ export class Renderer {
     const noTimestamps = { timestampWrites: () => undefined };
     [false, true].forEach((prepass, i) => {
       const encoder = device.createCommandEncoder({ label: `verify-prepass-${prepass}` });
-      this.primary.encode({ encoder, profiler: noTimestamps, time: 0, camera }, prepass);
+      this.primary.encode({ encoder, profiler: noTimestamps, time: 0, dt: 0, camera }, prepass);
       encoder.copyTextureToBuffer({ texture: g.gbuffer0! }, { buffer: runs[i]!.g, bytesPerRow: rowG }, { width, height });
       encoder.copyTextureToBuffer({ texture: g.depth! }, { buffer: runs[i]!.d, bytesPerRow: rowD }, { width, height });
       device.queue.submit([encoder.finish()]);
@@ -232,6 +281,8 @@ export class Renderer {
   }
 
   private chainFor(view: DebugView): SceneChain {
+    if (view === 'lit') return this.chains.lit;
+    if (view === 'shadow' || view === 'skyvis') return this.chains.visibility;
     if (view === 'topdown') return this.chains.topdown;
     if (view === 'gradient') return this.chains.gradient;
     return this.chains.gbuffer;

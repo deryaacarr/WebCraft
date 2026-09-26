@@ -30,6 +30,10 @@ export interface CameraFrame {
   prevDelta: Vec3;
   /** Current sub-pixel jitter in pixels, each in [−0.5, 0.5). */
   jitter: [number, number];
+  /** Previous frame's forward axis. */
+  prevForward: Vec3;
+  /** Frame counter (noise seeds). */
+  frameIndex: number;
 }
 
 /**
@@ -45,7 +49,8 @@ export class FlyCamera {
   private prevYaw = 0;
   private prevPitch: number;
   private frameIndex = 0;
-  private lastFrame: { viewProj: Mat4; position: Vec3 } | null = null;
+  private lastFrame: { viewProj: Mat4; position: Vec3; forward: Vec3 } | null = null;
+  private frames = 0;
 
   constructor(position: Vec3, pitchDeg = -20, yawDeg = 0) {
     this.position = [...position];
@@ -114,21 +119,24 @@ export class FlyCamera {
     const jittered = multiply(jitterProjection(proj, jitter[0], jitter[1], width, height), view);
     const invViewProj = invert(jittered);
 
-    const prev = this.lastFrame ?? { viewProj, position };
+    const forward = forwardFromYawPitch(yaw, pitch);
+    const prev = this.lastFrame ?? { viewProj, position, forward };
     const prevDelta: Vec3 = [position[0] - prev.position[0], position[1] - prev.position[1], position[2] - prev.position[2]];
-    this.lastFrame = { viewProj, position };
+    this.lastFrame = { viewProj, position, forward };
 
     const cell: Vec3 = [Math.floor(position[0]), Math.floor(position[1]), Math.floor(position[2])];
     return {
       cell,
       frac: [position[0] - cell[0], position[1] - cell[1], position[2] - cell[2]],
       position,
-      forward: forwardFromYawPitch(yaw, pitch),
+      forward,
       invViewProj,
       viewProj,
       prevViewProj: prev.viewProj,
       prevDelta,
       jitter,
+      prevForward: prev.forward,
+      frameIndex: this.frames++,
     };
   }
 

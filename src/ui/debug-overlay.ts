@@ -1,7 +1,9 @@
 import GUI from 'lil-gui';
 import Stats from 'stats-gl';
 import { config, DEBUG_VIEWS, TEXTURE_RESOLUTIONS, type TextureResolution } from '../config';
+import type { TimeOfDay } from '../core/time-of-day';
 import type { MaterialStats } from '../gpu/materials';
+import type { SkyState } from '../gpu/sky';
 import type { Vec3 } from '../core/math';
 import type { BrickmapMemory } from '../gpu/brickmap';
 import type { VerifyResult } from '../gpu/brickmap-verify';
@@ -44,6 +46,10 @@ export interface DebugOverlayHooks {
   /** Times the primary pass alone, back to back. */
   onBenchmarkPrimary(): Promise<{ gpuMs: number | null; wallMs: number; avgSteps: number; p95Steps: number }>;
   materialStats(): MaterialStats;
+  /** In-game clock (the time-of-day slider edits it directly). */
+  clock: TimeOfDay;
+  onBenchmarkLighting(): Promise<{ visibilityMs: number | null; lightingMs: number | null }>;
+  skyState(): SkyState;
   /** Reloads the material textures at another resolution. */
   onTextureResolution(resolution: TextureResolution): Promise<void>;
   /** Re-creates the material sampler (anisotropy changed). */
@@ -175,6 +181,7 @@ export class DebugOverlay {
     this.buildBrickmapControls(hooks);
     this.buildCameraControls(hooks);
     this.buildMaterialControls(hooks);
+    this.buildSkyControls(hooks);
 
     const input = this.gui.addFolder('Input');
     input.add(config.input, 'mouseSensitivity', 0.0001, 0.01, 0.0001).name('mouse sensitivity');
@@ -214,6 +221,14 @@ export class DebugOverlay {
     this.worldValues.queued = s.queued;
     this.worldValues.avgChunkMs = s.avgChunkMs.toFixed(2);
 
+    const c = this.hooks.clock;
+    const hh = Math.floor(c.hours);
+    const mm = Math.floor((c.hours - hh) * 60);
+    this.skyValues.clock = `day ${c.day}, ${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+    const st = c.state(config.sky);
+    this.skyValues.moon = `${Math.round(st.moonPhase * 100)} % lit`;
+    this.skyValues.light = this.hooks.skyState().lightIsMoon ? 'moon' : 'sun';
+
     const m = this.hooks.materialStats();
     if (this.materialValues.source !== 'loading…' || m.resolution === config.textures.resolution) {
       this.materialValues.source = `${m.source} ${m.resolution}px, ${m.layers} layers`;
@@ -233,6 +248,49 @@ export class DebugOverlay {
     this.brickValues.pending = b.pendingChunks;
     this.brickValues.uploadedMB = (b.uploadedBytes / MB).toFixed(1);
     this.brickValues.dropped = b.droppedBricks;
+  }
+
+  private readonly skyValues = { clock: '', moon: '', light: '', cost: '–' };
+
+  private buildSkyControls(hooks: DebugOverlayHooks): void {
+    const s = config.sky;
+    const f = this.gui.addFolder('Sky & lighting');
+    f.add(hooks.clock, 'hours', 0, 24, 0.05).name('time of day (h)').listen();
+    f.add(s, 'dayLengthMinutes', 0, 120, 1).name('day length (real min)');
+    f.add(s, 'paused').name('pause time');
+    f.add(s, 'latitude', -80, 80, 1).name('latitude (°)');
+    f.add(s, 'sunDeclination', -23.4, 23.4, 0.1).name('season (sun decl. °)');
+    f.add(s, 'sunAngularRadius', 0.1, 3, 0.05).name('sun radius (°, softness)');
+    f.add(s, 'nightBoost', 1, 1000, 1).name('night brightness ×');
+    f.add(s, 'starBrightness', 0, 0.05, 0.0005).name('stars');
+    f.add(this.skyValues, 'clock').name('clock').disable().listen();
+    f.add(this.skyValues, 'moon').name('moon').disable().listen();
+    f.add(this.skyValues, 'light').name('shadow light').disable().listen();
+    const e = config.exposure;
+    f.add(e, 'compensation', -5, 5, 0.1).name('exposure comp. (EV)');
+    f.add(e, 'adaptationSpeed', 0.1, 10, 0.1).name('eye adaptation speed');
+    const l = config.lighting;
+    f.add(l, 'temporalFrames', 1, 64, 1).name('shadow history (frames)');
+    f.add(l, 'visibilityCheckerboard').name('shadow rays ¼ per frame');
+    f.add(l, 'skyVisibilityDistance', 2, 128, 1).name('sky vis. distance');
+    f.add(l, 'emissiveStrength', 0, 30, 0.5).name('emissive strength');
+    f.add(l, 'subsurface', 0, 2, 0.05).name('leaf translucency');
+    f.add(this.skyValues, 'cost').name('lighting cost').disable().listen();
+    const bench = {
+      run: () => {
+        this.skyValues.cost = 'running…';
+        hooks.onBenchmarkLighting().then(
+          (r) => {
+            this.skyValues.cost = `visibility ${r.visibilityMs?.toFixed(2) ?? 'n/a'} ms, shading ${r.lightingMs?.toFixed(2) ?? 'n/a'} ms`;
+          },
+          (err: unknown) => {
+            this.skyValues.cost = `error: ${err instanceof Error ? err.message : String(err)}`;
+          },
+        );
+      },
+    };
+    f.add(bench, 'run').name('Benchmark lighting passes');
+    f.close();
   }
 
   private readonly materialValues = { source: '', memoryMB: '0', primary: '–' };

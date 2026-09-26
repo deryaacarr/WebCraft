@@ -6,8 +6,8 @@ import type { MaterialSystem } from '../materials';
 import { traceConstants } from '../trace-constants';
 import type { FrameContext, RenderPass } from './pass';
 
-// Camera struct in camera.wgsl: 3 × mat4x4f (192 B) + 5 × 16 B.
-const CAMERA_SIZE = 272;
+// Camera struct in camera.wgsl: 3 × mat4x4f (192 B) + 6 × 16 B.
+const CAMERA_SIZE = 288;
 const DEG = Math.PI / 180;
 
 /**
@@ -23,7 +23,8 @@ export class PrimaryPass implements RenderPass {
   private coarse: GPUTexture | null = null;
   private brickmapLayout!: GPUBindGroupLayout;
   private prepassLayout!: GPUBindGroupLayout;
-  private camera!: GPUBuffer;
+  /** Camera uniform (camera.wgsl), shared with the lighting passes. */
+  camera!: GPUBuffer;
   private materialLayout!: GPUBindGroupLayout;
   private bindGroup: GPUBindGroup | null = null;
   private readonly cameraData = new ArrayBuffer(CAMERA_SIZE);
@@ -126,6 +127,8 @@ export class PrimaryPass implements RenderPass {
     f32[63] = config.trace.prepassSafety;
     u32[66] = prepass ? tile : 0;
     u32[67] = config.trace.prepassMaxSteps;
+    f32.set(cam.prevForward, 68);
+    u32[71] = cam.frameIndex;
     this.device.queue.writeBuffer(this.camera, 0, this.cameraData);
 
     const timestampWrites = ctx.profiler.timestampWrites(this.name);
