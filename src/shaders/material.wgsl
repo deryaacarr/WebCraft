@@ -35,7 +35,8 @@ struct MaterialInfo {
   first_layer: u32,
   variants: u32,
   flags: u32,
-  _pad: u32,
+  /// Mean opacity of the albedo texels (foliage coverage, for GI rays).
+  coverage: f32,
 };
 
 const MATERIAL_ROTATE: u32 = 1u;

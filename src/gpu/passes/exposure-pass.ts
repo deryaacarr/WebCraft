@@ -6,7 +6,7 @@ import type { SkySystem } from '../sky';
 import type { FrameContext, RenderPass } from './pass';
 
 // ExposureParams in exposure.wgsl.
-const PARAMS_SIZE = 64;
+const PARAMS_SIZE = 80;
 const WB_MODES = { off: 0, auto: 1, manual: 2 } as const;
 
 /** Eye adaptation and auto white balance (exposure.wgsl) from the lit HDR frame. */
@@ -71,9 +71,11 @@ export class ExposurePass implements RenderPass {
     f32[11] = wb.strength;
     f32.set(kelvinToLinearRgb(wb.temperature), 12);
     f32[15] = wb.adaptSeconds;
+    f32[16] = e.maxDarkAdaptationEv;
     this.device.queue.writeBuffer(this.params, 0, p);
 
-    const pass = ctx.encoder.beginComputePass({ label: this.name });
+    const timestampWrites = ctx.profiler.timestampWrites(this.name);
+    const pass = ctx.encoder.beginComputePass({ label: this.name, ...(timestampWrites && { timestampWrites }) });
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.group);
     // Sky params (light direction) and the lighting summary: the scene illuminant.

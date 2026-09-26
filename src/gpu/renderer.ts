@@ -3,7 +3,9 @@ import type { CameraFrame, FlyCamera } from '../player/camera';
 import type { GpuBrickmap } from './brickmap';
 import type { MaterialSystem } from './materials';
 import { AerialPerspectivePass } from './passes/aerial-perspective-pass';
+import type { EmitterRegistry } from '../world/emitters';
 import { ExposurePass } from './passes/exposure-pass';
+import { GiPass } from './passes/gi-pass';
 import { LightingPass } from './passes/lighting-pass';
 import { VisibilityPass } from './passes/visibility-pass';
 import type { SkySystem } from './sky';
@@ -38,6 +40,9 @@ export class Renderer {
   private readonly chains: Record<ChainName, SceneChain>;
   private readonly lighting: LightingPass;
   private readonly visibility: VisibilityPass;
+  private readonly gi: GiPass;
+  private readonly aerial: AerialPerspectivePass;
+  private readonly exposure: ExposurePass;
   private lastTime: number | null = null;
   private readonly allPasses: RenderPass[];
   private readonly blit: BlitPass;
@@ -52,6 +57,7 @@ export class Renderer {
     brickmap: GpuBrickmap,
     materials: MaterialSystem,
     private readonly sky: SkySystem,
+    emitters: EmitterRegistry,
   ) {
     const { device } = gpu;
     this.profiler = new GpuProfiler(device, gpu.timestampQuery);
@@ -61,24 +67,29 @@ export class Renderer {
     this.primary = primary;
     const camera = () => primary.camera;
     const visibility = new VisibilityPass(device, this.gbuffer, camera, brickmap, materials, sky);
+    // Last frame's lit image, for GI screen reuse (the lighting pass runs after GI).
+    const gi = new GiPass(device, this.gbuffer, camera, brickmap, materials, sky, emitters, () => this.lighting?.output ?? null);
     const aerial = new AerialPerspectivePass(device, camera, sky);
-    const lighting = new LightingPass(device, this.gbuffer, camera, visibility, sky, aerial);
+    const lighting = new LightingPass(device, this.gbuffer, camera, visibility, sky, aerial, gi);
     this.visibility = visibility;
     this.lighting = lighting;
+    this.gi = gi;
+    this.aerial = aerial;
     const exposure = new ExposurePass(device, () => lighting.output, this.gbuffer, sky);
+    this.exposure = exposure;
     const view = new GBufferViewPass(device, this.gbuffer);
     const topdown = new TopdownPass(device, brickmap);
     const gradient = new GradientPass(device);
     const out = (p: { output: GPUTexture | null }) => () => p.output;
     this.chains = {
-      lit: { passes: [primary, visibility, aerial, lighting, exposure], output: out(lighting), tonemap: true, sky: true },
-      visibility: { passes: [primary, visibility, aerial, lighting], output: out(lighting), tonemap: false, sky: true },
+      lit: { passes: [primary, visibility, gi, aerial, lighting, exposure], output: out(lighting), tonemap: true, sky: true },
+      visibility: { passes: [primary, visibility, gi, aerial, lighting], output: out(lighting), tonemap: false, sky: true },
       gbuffer: { passes: [primary, view], output: out(view), tonemap: false, sky: false },
       topdown: { passes: [topdown], output: out(topdown), tonemap: false, sky: false },
       gradient: { passes: [gradient], output: out(gradient), tonemap: false, sky: false },
     };
     // Resize order matters: the G-buffer consumers after the passes they read from.
-    this.allPasses = [primary, visibility, aerial, lighting, exposure, view, topdown, gradient];
+    this.allPasses = [primary, visibility, gi, aerial, lighting, exposure, view, topdown, gradient];
     this.blit = new BlitPass(device, gpu.context, gpu.format, sky.exposure);
   }
 
@@ -101,7 +112,7 @@ export class Renderer {
     if (this.size.apply() || this.resolutionDirty) this.resizeTargets();
     const view = config.debug.view;
     const chain = this.chainFor(view);
-    this.lighting.mode = view === 'shadow' || view === 'skyvis' || view === 'history' ? view : 'lit';
+    this.lighting.mode = view === 'shadow' || view === 'skyvis' || view === 'history' || view === 'gi' ? view : 'lit';
     this.blit.setTonemap(chain.tonemap ? config.render.tonemapper : 'none');
     const output = chain.output();
     if (output !== this.boundOutput && output) {
@@ -145,6 +156,32 @@ export class Renderer {
       visibilityMs: (await this.benchmarkPasses([vis], iterations)).gpuMs,
       lightingMs: (await this.benchmarkPasses([light], iterations)).gpuMs,
     };
+  }
+
+  /**
+   * Frame cost by stage (each timed back to back on its own, same camera as the last
+   * frame): primary, visibility, GI tracing (ReSTIR + paths), GI denoising and the rest
+   * (aerial perspective, shading, exposure). Sky LUTs and the blit are not included.
+   */
+  async benchmarkFrame(iterations: number): Promise<Record<'primary' | 'visibility' | 'giTrace' | 'giDenoise' | 'other', number | null>> {
+    const time = async (passes: RenderPass[]) => (await this.benchmarkPasses(passes, iterations)).gpuMs;
+    const primary = await time([this.primary]);
+    const visibility = await time([this.visibility]);
+    let giTrace: number | null = null;
+    let giDenoise: number | null = null;
+    if (config.gi.enabled) {
+      try {
+        this.gi.stage = 'trace';
+        giTrace = await time([this.gi]);
+        this.gi.stage = 'denoise';
+        giDenoise = await time([this.gi]);
+      } finally {
+        this.gi.stage = 'all';
+      }
+    }
+    // Only passes that record work (the timestamps pair the first and last pass).
+    const other = await time([...(config.sky.aerialPerspective.enabled ? [this.aerial] : []), this.lighting, this.exposure]);
+    return { primary, visibility, giTrace, giDenoise, other };
   }
 
   /**
@@ -315,7 +352,7 @@ export class Renderer {
   }
 
   private chainFor(view: DebugView): SceneChain {
-    if (view === 'lit') return this.chains.lit;
+    if (view === 'lit' || view === 'gi') return this.chains.lit;
     if (view === 'shadow' || view === 'skyvis' || view === 'history') return this.chains.visibility;
     if (view === 'topdown') return this.chains.topdown;
     if (view === 'gradient') return this.chains.gradient;

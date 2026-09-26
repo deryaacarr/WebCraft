@@ -31,7 +31,20 @@ struct ExposureParams {
   wb_strength: f32,
   manual_illuminant: vec3f,
   wb_tau: f32,
+  /// Eyes adapt at most this many EV brighter than for a mid-grey surface in the open
+  /// (lit by the dominant light and the whole sky): caves at noon stay dark, while at
+  /// night — when the open itself is dark — the full range is available.
+  max_dark_adaptation_ev: f32,
+  _pad0: f32,
+  _pad1: f32,
+  _pad2: f32,
 };
+
+const MID_GREY: f32 = 0.18;
+
+fn luminance3(c: vec3f) -> f32 {
+  return dot(c, vec3f(0.2126, 0.7152, 0.0722));
+}
 
 /// Exposure state, also read by sky.wgsl (element 0) and the blit (matrix).
 struct ExposureState {
@@ -132,7 +145,10 @@ fn main(@builtin(local_invocation_index) i: u32) {
   let previous = state.exposure;
   if (weight > 0.0) {
     let scene = exp2(sum / weight) / previous;
-    let goal = clamp(params.key * exp2(params.compensation_ev) / scene, params.min_exposure, params.max_exposure);
+    // Luminance of a mid-grey surface in the open: the adaptation reference.
+    let open = MID_GREY / PI * (luminance3(lighting.light_illuminance) * max(sky.light_dir.y, 0.0) + luminance3(lighting.sky_irradiance));
+    let limit = params.key * exp2(params.compensation_ev + params.max_dark_adaptation_ev) / max(open, 1e-12);
+    let goal = clamp(min(params.key * exp2(params.compensation_ev) / scene, limit), params.min_exposure, params.max_exposure);
     let tau = select(params.tau_brighter, params.tau_darker, goal > previous);
     let blend = 1.0 - exp(-params.dt / max(tau, 1e-3));
     state.exposure = exp2(mix(log2(previous), log2(goal), blend));

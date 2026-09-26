@@ -18,6 +18,7 @@ export const DEBUG_VIEWS = [
   'shadow',
   'skyvis',
   'history',
+  'gi',
   'topdown',
   'gradient',
 ] as const;
@@ -321,8 +322,16 @@ export const config = {
     skyVisibilitySteps: 64,
     /** Shadow rays stop here (blocks). */
     shadowDistance: 512,
-    /** Multiplier for emissive materials (torch, lava). */
-    emissiveStrength: 6,
+    /** Light-emitting blocks: black-body colour temperature (K) and mean radiance of a
+     *  block face (relative units: sun illuminance = 1). Falls off with 1 / d² (ReSTIR DI).
+     *  The glowing texels are brighter: the mean is spread over the emissive part only. */
+    emitters: {
+      torch: { temperature: 1950, radiance: 0.2 },
+      lava: { temperature: 1700, radiance: 0.2 },
+    } as Record<string, { temperature: number; radiance: number }>,
+    /** Flicker of emitted light: relative amplitude, speed (Hz-ish) and the spatial size
+     *  (blocks) of the smooth noise field, so each torch's surroundings flicker on their own. */
+    flicker: { amount: 0.15, speed: 3, scale: 6 },
     /** Light passing through leaves (subsurface scattering approximation). */
     subsurface: 0.5,
     /** Fraction of light a leaf voxel lets through for shadow / sky rays. */
@@ -340,13 +349,75 @@ export const config = {
       bounceIsotropic: 0.1,
     },
   },
+  /** Global illumination: half-resolution path tracing (1 bounce), ReSTIR DI for emissive
+   *  blocks, SVGF denoising. Replaces the approximate sky-ambient term when enabled. */
+  gi: {
+    enabled: true,
+    /** GI resolution divisor: the GI grid is (width / d) × (height / d); 3 keeps GI +
+     *  denoising within ~5 ms in dense scenes at 1440×800 (2 = sharper, costlier). */
+    resolutionDivisor: 3,
+    /** Half-res pixels traced per frame: all, half (alternating checkerboard) or a
+     *  quarter (one per 2×2 block, rotating); temporal accumulation fills the rest. */
+    tracePattern: 'quarter' as 'all' | 'half' | 'quarter',
+    /** Bounce hits visible on screen reuse last frame's lit radiance (cheap, adds further
+     *  bounces); off = always shade them with shadow and sky rays. */
+    screenReuse: true,
+    /** Bounce ray length (blocks) and DDA step budget; beyond it the sky LUT is used. */
+    range: 48,
+    maxSteps: 96,
+    /** Shadow rays from bounce hits (and to emitters). */
+    shadowDistance: 96,
+    shadowMaxSteps: 96,
+    /** Short sky ray from bounce hits (enclosed hits, e.g. in caves, get no sky). */
+    skyDistance: 12,
+    skyMaxSteps: 32,
+    /** Albedo at bounce hits from a coarse mip: this many texels across a face (1 = the
+     *  material's mean colour). */
+    hitTexels: 1,
+    /** Surfaces with (1 − roughness)² below this get no specular rays (rough specular
+     *  comes from the diffuse irradiance). */
+    specularThreshold: 0.25,
+    /** Per-sample luminance ceiling (pre-exposed; mid-grey ≈ 0.18) against fireflies. */
+    fireflyClamp: 16,
+    /** Temporal accumulation cap (frames) for a still / fast-moving camera. */
+    historyStill: 32,
+    historyMoving: 8,
+    /** À-trous iterations for diffuse / specular, luminance edge-stopping strength (× σ),
+     *  specular roughness edge-stopping. */
+    atrousIterations: 5,
+    specularIterations: 3,
+    sigmaLuminance: 4,
+    sigmaLuminanceSpecular: 2,
+    /** "Same surface" tolerance (blocks) between face planes: absolute, since parallel
+     *  voxel faces lie whole blocks apart. */
+    planeTolerance: 0.25,
+    specularRoughnessSigma: 10,
+    /** Which GI signal shading uses (debug): denoised / temporally accumulated / raw 1 spp. */
+    debugSignal: 'denoised' as 'denoised' | 'accumulated' | 'raw',
+    /** ReSTIR DI for emissive blocks (torch, lava). */
+    restir: {
+      enabled: true,
+      /** Initial RIS candidates per pixel and frame. */
+      candidates: 8,
+      /** Temporal reuse: history capped at this × candidates samples. */
+      temporalMaxMFactor: 20,
+      /** Spatial reuse: neighbours and radius (half-res pixels). */
+      spatialSamples: 3,
+      spatialRadius: 12,
+      /** Light list: emitters within this distance of the camera, nearest first. */
+      lightRadius: 64,
+      maxLights: 1024,
+      /** Rebuild the light list when the camera moved this far (blocks). */
+      rebuildDistance: 4,
+    },
+  },
   exposure: {
     /** Target mid-grey after exposure. */
     key: 0.18,
     /** Manual correction in EV (stops). */
     compensation: 0,
     /** Adaptation time constants (s): scene getting darker (eyes open up) / brighter. */
-    adaptDarkerSeconds: 2,
+    adaptDarkerSeconds: 3.5,
     adaptBrighterSeconds: 0.5,
     /** Metering: drop this fraction of the weight at each end of the histogram. */
     trim: 0.05,
@@ -358,6 +429,10 @@ export const config = {
     /** Exposure limits as log2 multipliers of the lighting unit. */
     minEv: -2,
     maxEv: 16,
+    /** Dark adaptation limit: at most this many EV brighter than for a mid-grey surface in
+     *  the open (sun + sky there). Keeps caves and deep shade dark by day; nights (dark
+     *  outside too) still get the full range. */
+    maxDarkAdaptationEv: 8,
   },
   whiteBalance: {
     /** 'auto': neutralise the scene light like a camera; 'manual': fixed temperature. */
@@ -388,6 +463,9 @@ export const config = {
      *  flight (blocks/s). URL: &spin=90&fly=20. */
     cameraSpin: 0,
     cameraFly: 0,
+    /** "Place test torches" button / &torches=N: count and radius around the camera. */
+    testTorches: 12,
+    testTorchRadius: 16,
     /** Back-to-back primary passes timed by "Benchmark primary". */
     benchmarkIterations: 50,
     /** Key that toggles the debug overlay. */

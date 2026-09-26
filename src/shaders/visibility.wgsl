@@ -18,7 +18,8 @@ struct VisibilityParams {
   sky_max_steps: u32,
   /// Fraction of light a leaf voxel lets through (on top of its alpha holes).
   leaf_transmission: f32,
-  _pad1: u32,
+  /// 0 while GI is on: GI brings the sky light (with real occlusion), no sky ray needed.
+  sky_enabled: u32,
   _pad2: u32,
 };
 
@@ -135,11 +136,14 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   }
 
   // Sky ray: cosine-weighted around the face normal.
-  let q = random2(gid.xy, cam.frame_index, 1u);
-  let sin_t = sqrt(q.x);
-  let phi = 2.0 * PI * q.y;
-  let d = basis(n) * vec3f(sin_t * cos(phi), sin_t * sin(phi), sqrt(1.0 - q.x));
-  let skyv = transmittance(start, d, params.sky_distance, params.sky_max_steps);
+  var skyv = 1.0;
+  if (params.sky_enabled != 0u) {
+    let q = random2(gid.xy, cam.frame_index, 1u);
+    let sin_t = sqrt(q.x);
+    let phi = 2.0 * PI * q.y;
+    let d = basis(n) * vec3f(sin_t * cos(phi), sin_t * sin(phi), sqrt(1.0 - q.x));
+    skyv = transmittance(start, d, params.sky_distance, params.sky_max_steps);
+  }
 
   textureStore(output, px, vec4f(sun, skyv, 0.0, 0.0));
 }

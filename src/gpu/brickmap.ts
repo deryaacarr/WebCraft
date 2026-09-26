@@ -1,6 +1,6 @@
 import { config } from '../config';
 import { toChunkCoord } from '../world/coords';
-import type { World } from '../world/world';
+import type { World, WorldChanges } from '../world/world';
 import { BRICK_STRIDE_BYTES, EMPTY_FLAG } from './brick-pack';
 import { BrickDistanceField, type CellBox } from './brick-distance';
 import { brickGridSize, BrickStore, type BrickGridSize, type BrickSink } from './brick-store';
@@ -82,9 +82,11 @@ export class GpuBrickmap implements BrickSink {
 
   /** Per-frame: follow the player, upload world changes within the time budget, then
    *  refresh the distance field around the cells that changed. */
-  sync(world: World, x: number, z: number): void {
+  /** `changes`: the world's changes since the last sync (taken by the caller when other
+   *  consumers need them too). */
+  sync(world: World, x: number, z: number, changes: WorldChanges = world.takeChanges()): void {
     this.store.setCenter(toChunkCoord(x), toChunkCoord(z), world);
-    this.store.applyChanges(world.takeChanges());
+    this.store.applyChanges(changes);
     this.store.process(world, config.brickmap.uploadBudgetMs);
     this.flushDistance();
   }

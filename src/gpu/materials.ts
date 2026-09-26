@@ -55,6 +55,12 @@ export class MaterialSystem {
   private manifest: TextureManifest | null = null;
   private current: MaterialStats = { source: 'fallback', resolution: 0, layers: 0, bytes: 0 };
   private readonly paramData = new ArrayBuffer(PARAMS_SIZE);
+  /**
+   * Per material, over all variants: rgb = texture average of linear albedo × emission ×
+   * opacity; a = emissive coverage, the average of emission × opacity (how much of a face
+   * glows — the light's radiance is spread over that part).
+   */
+  emissiveRadiance: Float32Array = new Float32Array(MATERIAL_NAMES.length * 4);
 
   constructor(private readonly device: GPUDevice) {
     this.params = device.createBuffer({ label: 'material-params', size: PARAMS_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -200,8 +206,14 @@ export class MaterialSystem {
     });
     this.generateMips(mips, layers);
 
+    this.emissiveRadiance = meanEmission(set);
     const table = new Uint32Array(MATERIAL_NAMES.length * 4);
-    set.materials.forEach((m, i) => table.set([m.firstLayer, m.count, m.flags, 0], i * 4));
+    const coverage = meanCoverage(set);
+    const tableFloats = new Float32Array(table.buffer);
+    set.materials.forEach((m, i) => {
+      table.set([m.firstLayer, m.count, m.flags], i * 4);
+      tableFloats[i * 4 + 3] = coverage[i]!;
+    });
     this.materialTable?.destroy();
     this.materialTable = this.device.createBuffer({ label: 'material-table', size: table.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.device.queue.writeBuffer(this.materialTable, 0, table);
@@ -263,4 +275,45 @@ export function fallbackSet(): LayerSet {
     materials: MATERIAL_NAMES.map((_, i) => ({ firstLayer: i, count: 1, flags: 0 })),
     source: 'fallback',
   };
+}
+
+const srgbToLinear = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+
+/** Per material: mean of linear albedo × emission × opacity (rgb) and of emission × opacity (a). */
+export function meanEmission(set: LayerSet): Float32Array {
+  const out = new Float32Array(set.materials.length * 4);
+  const texels = set.resolution * set.resolution;
+  const layerBytes = texels * 4;
+  const specBase = 2 * set.layers * layerBytes;
+  set.materials.forEach((m, i) => {
+    const sum = [0, 0, 0, 0];
+    for (let l = m.firstLayer; l < m.firstLayer + m.count; l++) {
+      for (let t = 0; t < texels; t++) {
+        const e = set.pack[specBase + l * layerBytes + t * 4 + 3]!;
+        if (e === 255) continue; // 255 = no emission (LabPBR)
+        const a = l * layerBytes + t * 4;
+        const w = (e / 254) * (set.pack[a + 3]! / 255);
+        for (let k = 0; k < 3; k++) sum[k]! += srgbToLinear(set.pack[a + k]! / 255) * w;
+        sum[3]! += w;
+      }
+    }
+    const n = Math.max(1, m.count * texels);
+    out.set([sum[0]! / n, sum[1]! / n, sum[2]! / n, sum[3]! / n], i * 4);
+  });
+  return out;
+}
+
+/** Per material: mean opacity (albedo alpha) over all its texels. */
+export function meanCoverage(set: LayerSet): Float32Array {
+  const out = new Float32Array(set.materials.length);
+  const texels = set.resolution * set.resolution;
+  const layerBytes = texels * 4;
+  set.materials.forEach((m, i) => {
+    let sum = 0;
+    for (let l = m.firstLayer; l < m.firstLayer + m.count; l++) {
+      for (let t = 0; t < texels; t++) sum += set.pack[l * layerBytes + t * 4 + 3]!;
+    }
+    out[i] = sum / 255 / Math.max(1, m.count * texels);
+  });
+  return out;
 }

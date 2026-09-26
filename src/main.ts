@@ -18,6 +18,8 @@ import { TerrainGenerator } from './world/gen/terrain';
 import { defaultWorkerCount, TerrainWorkerPool } from './world/gen/worker-pool';
 import { ChunkStreamer } from './world/streamer';
 import { World } from './world/world';
+import { BlockId, isSolid } from './world/blocks';
+import { EmitterRegistry } from './world/emitters';
 
 async function main(): Promise<void> {
   const canvas = document.querySelector<HTMLCanvasElement>('#canvas');
@@ -33,6 +35,7 @@ async function main(): Promise<void> {
     config.sky.paused = true;
   }
   if (overrides.workgroup) config.trace.workgroup = overrides.workgroup;
+  if (overrides.gi !== undefined) config.gi.enabled = overrides.gi;
   if (overrides.prepassTile) config.trace.prepassTile = overrides.prepassTile;
   if (overrides.distanceMax) config.trace.distanceMax = overrides.distanceMax;
 
@@ -45,7 +48,8 @@ async function main(): Promise<void> {
   const sky = new SkySystem(gpu.device);
   await sky.init();
   const clock = new TimeOfDay(config.sky.timeOfDay, config.sky.startDay);
-  const renderer = new Renderer(gpu, canvas, brickmap, materials, sky);
+  const emitters = new EmitterRegistry();
+  const renderer = new Renderer(gpu, canvas, brickmap, materials, sky, emitters);
   await renderer.init();
 
   const world = new World();
@@ -64,6 +68,29 @@ async function main(): Promise<void> {
       config.camera.spawnHeight,
     0.5,
   ];
+  /**
+   * Debug: puts torches on the ground around the camera (lighting tests; there is no
+   * block placing yet). Scans each random column down from just above the camera for the
+   * first air cell resting on a solid block (works in caves too). Returns how many.
+   */
+  const placeTorches = (count: number, radius: number): number => {
+    const [cx, cy, cz] = camera.position;
+    let placed = 0;
+    for (let attempt = 0; attempt < count * 20 && placed < count; attempt++) {
+      const a = Math.random() * 2 * Math.PI;
+      const r = radius * Math.sqrt(Math.random());
+      const x = Math.floor(cx + Math.cos(a) * r);
+      const z = Math.floor(cz + Math.sin(a) * r);
+      for (let y = Math.floor(cy) + 4; y > cy - radius * 2; y--) {
+        if (world.getBlock(x, y, z) !== BlockId.air || !isSolid(world.getBlock(x, y - 1, z))) continue;
+        if (world.setBlock(x, y, z, BlockId.torch)) placed++;
+        break;
+      }
+    }
+    return placed;
+  };
+  let pendingTorches = overrides.torches ?? 0;
+
   const pose = overrides.camera;
   let camera = pose ? new FlyCamera(pose.position, pose.pitchDeg, pose.yawDeg) : new FlyCamera(spawn());
 
@@ -85,6 +112,9 @@ async function main(): Promise<void> {
     onBenchmarkPrimary: () => renderer.benchmarkPrimary(config.debug.benchmarkIterations),
     onBenchmarkLighting: () => renderer.benchmarkLighting(config.debug.benchmarkIterations),
     onVerifyPrepass: () => renderer.verifyPrepass(),
+    onBenchmarkFrame: () => renderer.benchmarkFrame(config.debug.benchmarkIterations),
+    onPlaceTorches: () => placeTorches(config.debug.testTorches, config.debug.testTorchRadius),
+    emitterCount: () => emitters.total,
     clock,
     skyState: () => sky.state,
     lightingStats: () => sky.readStats(),
@@ -105,6 +135,16 @@ async function main(): Promise<void> {
     },
   });
 
+  // Dev builds: expose internals for automated tests and benchmarks (console / CDP).
+  if (import.meta.env.DEV) Object.assign(window, {
+      webcraft: {
+        config, renderer, world, emitters, streamer, placeTorches,
+        setCamera: (x: number, y: number, z: number, yawDeg: number, pitchDeg: number) => {
+          camera = new FlyCamera([x, y, z], pitchDeg, yawDeg);
+        },
+      },
+    });
+
   const loop = new GameLoop({
     update: (dt) => {
       const minutes = config.sky.dayLengthMinutes;
@@ -116,7 +156,13 @@ async function main(): Promise<void> {
     },
     render: (alpha, time) => {
       debug.beginFrame();
-      brickmap.sync(world, camera.position[0], camera.position[2]);
+      // &torches=N: once the chunks around the camera are loaded.
+      if (pendingTorches > 0 && world.chunkCount > 0 && streamer.stats.missing === 0) {
+        pendingTorches -= placeTorches(pendingTorches, config.debug.testTorchRadius);
+      }
+      const changes = world.takeChanges();
+      emitters.apply(changes);
+      brickmap.sync(world, camera.position[0], camera.position[2], changes);
       sky.update(clock.state(config.sky), camera.position[1]);
       renderer.render(time, camera, alpha);
       debug.endFrame();

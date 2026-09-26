@@ -15,6 +15,12 @@ describe('parseUrlOverrides', () => {
     expect(parseUrlOverrides('?time=-1').timeOfDay).toBe(23);
   });
 
+  it('parses test torches and the GI switch', () => {
+    expect(parseUrlOverrides('?torches=8&gi=0')).toEqual({ torches: 8, gi: false });
+    expect(parseUrlOverrides('?gi=1').gi).toBe(true);
+    expect(parseUrlOverrides('?torches=-3').torches).toBeUndefined();
+  });
+
   it('ignores malformed values', () => {
     expect(parseUrlOverrides('?cam=1,2,x,4,5&view=nope&scale=-1')).toEqual({});
   });

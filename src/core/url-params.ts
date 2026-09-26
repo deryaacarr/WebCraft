@@ -10,6 +10,8 @@ import { DEBUG_VIEWS, type DebugView } from '../config';
  *   &dmax=8                      distance field max distance (benchmarking)
  *   &time=18.5                   time of day in hours; also pauses the clock
  *   &spin=90&fly=20              scripted camera turn (°/s) and forward flight (blocks/s)
+ *   &torches=12                  place test torches around the camera once loaded
+ *   &gi=0                        global illumination off
  */
 export interface UrlOverrides {
   camera?: { position: [number, number, number]; yawDeg: number; pitchDeg: number };
@@ -21,6 +23,8 @@ export interface UrlOverrides {
   timeOfDay?: number;
   cameraSpin?: number;
   cameraFly?: number;
+  torches?: number;
+  gi?: boolean;
 }
 
 export function parseUrlOverrides(search: string): UrlOverrides {
@@ -49,6 +53,9 @@ export function parseUrlOverrides(search: string): UrlOverrides {
   if (params.has('spin') && Number.isFinite(spin)) out.cameraSpin = spin;
   const fly = Number(params.get('fly'));
   if (params.has('fly') && Number.isFinite(fly)) out.cameraFly = fly;
+  const torches = positiveInt('torches');
+  if (torches) out.torches = torches;
+  if (params.has('gi')) out.gi = params.get('gi') !== '0';
   const dmax = positiveInt('dmax');
   if (dmax) out.distanceMax = Math.min(dmax, 254);
 

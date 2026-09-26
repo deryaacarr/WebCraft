@@ -10,7 +10,8 @@
     "test": "vitest run",
     "textures:fetch": "node scripts/fetch-textures.ts",
     "textures:build": "node scripts/build-textures.ts",
-    "textures": "npm run textures:fetch && npm run textures:build"
+    "textures": "npm run textures:fetch && npm run textures:build",
+    "bluenoise": "node scripts/build-blue-noise.ts"
   },
   "devDependencies": {
     "@types/node": "^26.6.2",

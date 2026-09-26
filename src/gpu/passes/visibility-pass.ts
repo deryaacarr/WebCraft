@@ -155,6 +155,7 @@ export class VisibilityPass implements RenderPass {
     new Float32Array(p).set([l.shadowDistance, l.skyVisibilityDistance]);
     new Uint32Array(p).set([config.trace.maxSteps, block, l.skyVisibilitySteps], 2);
     new Float32Array(p)[5] = l.leafTransmission;
+    new Uint32Array(p)[6] = config.gi.enabled ? 0 : 1;
     this.device.queue.writeBuffer(this.params, 0, p);
     // How fast the camera moves this frame (0 still … 1 fast): translation plus rotation.
     const c = ctx.camera;

@@ -59,6 +59,12 @@ export interface DebugOverlayHooks {
   onSamplerChange(): void;
   /** Compares the G-buffer rendered with and without the depth prepass. */
   onVerifyPrepass(): Promise<{ pixels: number; mismatches: number; first?: string }>;
+  /** Frame cost by stage (ms): primary, visibility, GI trace, GI denoise, other. */
+  onBenchmarkFrame(): Promise<Record<'primary' | 'visibility' | 'giTrace' | 'giDenoise' | 'other', number | null>>;
+  /** Places test torches around the camera; returns how many. */
+  onPlaceTorches(): number;
+  /** Emissive blocks in the loaded world. */
+  emitterCount(): number;
 }
 
 /**
@@ -185,6 +191,7 @@ export class DebugOverlay {
     this.buildCameraControls(hooks);
     this.buildMaterialControls(hooks);
     this.buildSkyControls(hooks);
+    this.buildGiControls(hooks);
     this.buildExposureControls();
 
     const input = this.gui.addFolder('Input');
@@ -236,6 +243,7 @@ export class DebugOverlay {
     this.skyValues.light = this.hooks.skyState().lightIsMoon ? 'moon' : 'sun';
 
     this.updateExposureStats();
+    this.giValues.emitters = String(this.hooks.emitterCount());
     const m = this.hooks.materialStats();
     if (this.materialValues.source !== 'loading…' || m.resolution === config.textures.resolution) {
       this.materialValues.source = `${m.source} ${m.resolution}px, ${m.layers} layers`;
@@ -269,6 +277,7 @@ export class DebugOverlay {
     f.add(e, 'adaptDarkerSeconds', 0.1, 10, 0.1).name('adapt to dark (s)');
     f.add(e, 'adaptBrighterSeconds', 0.1, 10, 0.1).name('adapt to bright (s)');
     f.add(e, 'centerSigma', 0, 2, 0.05).name('metering centre weight σ (0 = off)');
+    f.add(e, 'maxDarkAdaptationEv', 0, 16, 0.5).name('max dark adaptation (EV)');
     f.add(wb, 'mode', { 'auto white balance': 'auto', manual: 'manual', off: 'off' }).name('white balance');
     f.add(wb, 'temperature', 2000, 12000, 100).name('manual temperature (K)');
     f.add(wb, 'strength', 0, 1, 0.05).name('auto WB strength');
@@ -322,7 +331,11 @@ export class DebugOverlay {
     f.add(l, 'historyClipK', 0.25, 4, 0.05).name('history clip k·σ');
     f.add(l, 'visibilityCheckerboard').name('shadow rays ¼ per frame');
     f.add(l, 'skyVisibilityDistance', 2, 128, 1).name('sky vis. distance');
-    f.add(l, 'emissiveStrength', 0, 30, 0.5).name('emissive strength');
+    f.add(l.emitters.torch!, 'temperature', 1000, 6500, 50).name('torch colour (K)');
+    f.add(l.emitters.torch!, 'radiance', 0, 2, 0.01).name('torch radiance');
+    f.add(l.emitters.lava!, 'radiance', 0, 2, 0.01).name('lava radiance');
+    f.add(l.flicker, 'amount', 0, 1, 0.01).name('flicker amount');
+    f.add(l.flicker, 'speed', 0, 10, 0.1).name('flicker speed');
     f.add(l, 'subsurface', 0, 2, 0.05).name('leaf translucency');
     f.add(l, 'leafTransmission', 0, 1, 0.05).name('leaf transmission');
     f.add(l, 'model', { physical: 'physical', 'debug-fill': 'debug-fill' }).name('lighting');
@@ -344,6 +357,56 @@ export class DebugOverlay {
       },
     };
     f.add(bench, 'run').name('Benchmark lighting passes');
+    f.close();
+  }
+
+  private readonly giValues = { emitters: '0', frame: '–' };
+
+  private buildGiControls(hooks: DebugOverlayHooks): void {
+    const gi = config.gi;
+    const r = gi.restir;
+    const v = this.giValues;
+    const f = this.gui.addFolder('Global illumination');
+    f.add(gi, 'enabled').name('GI on');
+    f.add(gi, 'debugSignal', { denoised: 'denoised', 'accumulated (temporal only)': 'accumulated', 'raw 1 spp': 'raw' }).name('signal (debug)');
+    f.add(gi, 'resolutionDivisor', { '1/2': 2, '1/3': 3, '1/4': 4 }).name('GI resolution');
+    f.add(gi, 'tracePattern', { 'all pixels': 'all', 'half (checkerboard)': 'half', 'quarter (2×2)': 'quarter' }).name('traced per frame');
+    f.add(gi, 'screenReuse').name('reuse on-screen hits');
+    f.add(gi, 'range', 8, 256, 1).name('bounce range (blocks)');
+    f.add(gi, 'maxSteps', 16, 512, 1).name('bounce max steps');
+    f.add(gi, 'skyDistance', 2, 64, 1).name('sky ray at hits (blocks)');
+    f.add(gi, 'specularThreshold', 0, 1, 0.05).name('specular rays threshold');
+    f.add(gi, 'fireflyClamp', 1, 100, 1).name('firefly clamp');
+    f.add(gi, 'historyStill', 1, 128, 1).name('history cap, still');
+    f.add(gi, 'historyMoving', 1, 64, 1).name('history cap, moving');
+    f.add(gi, 'atrousIterations', 0, 6, 1).name('à-trous iterations');
+    f.add(gi, 'specularIterations', 0, 6, 1).name('à-trous iterations (spec.)');
+    f.add(gi, 'sigmaLuminance', 0.5, 16, 0.5).name('σ luminance');
+    f.add(gi, 'planeTolerance', 0.01, 1, 0.01).name('same-plane tolerance (blocks)');
+    f.add(r, 'enabled').name('ReSTIR DI (emitters)');
+    f.add(r, 'candidates', 1, 32, 1).name('RIS candidates');
+    f.add(r, 'spatialSamples', 0, 8, 1).name('spatial neighbours');
+    f.add(r, 'spatialRadius', 1, 32, 1).name('spatial radius (px)');
+    f.add(r, 'lightRadius', 8, 256, 1).name('light list radius');
+    f.add(v, 'emitters').name('emitters loaded').disable().listen();
+    f.add({ place: () => hooks.onPlaceTorches() }, 'place').name('Place test torches');
+    f.add(v, 'frame').name('frame (ms)').disable().listen();
+    const bench = {
+      run: () => {
+        v.frame = 'running…';
+        hooks.onBenchmarkFrame().then(
+          (t) => {
+            const ms = (x: number | null) => (x === null ? 'n/a' : x.toFixed(2));
+            const total = Object.values(t).reduce<number>((a, b) => a + (b ?? 0), 0);
+            v.frame = `primary ${ms(t.primary)} | vis ${ms(t.visibility)} | GI ${ms(t.giTrace)} | denoise ${ms(t.giDenoise)} | other ${ms(t.other)} | total ${total.toFixed(2)}`;
+          },
+          (err: unknown) => {
+            v.frame = `error: ${err instanceof Error ? err.message : String(err)}`;
+          },
+        );
+      },
+    };
+    f.add(bench, 'run').name('Benchmark frame breakdown');
     f.close();
   }
 
