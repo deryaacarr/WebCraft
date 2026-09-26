@@ -25,8 +25,9 @@ struct MaterialParams {
   /// domain warp (in feature sizes).
   variant_scale: f32,
   variant_warp: f32,
-  _pad0: f32,
-  _pad1: f32,
+  /// World-space layers: edge (m) of the area one layer covers, and on/off.
+  world_span: f32,
+  world_enabled: u32,
   _pad2: f32,
 };
 
@@ -42,6 +43,9 @@ struct MaterialInfo {
 const MATERIAL_ROTATE: u32 = 1u;
 const MATERIAL_POM: u32 = 2u;
 const MATERIAL_ALPHA_TEST: u32 = 4u;
+/// Natural material with world-space layers; their first index is flags >> 8.
+const MATERIAL_WORLD: u32 = 8u;
+const MATERIAL_WORLD_FIRST_SHIFT: u32 = 8u;
 const F0_METAL: f32 = 230.0 / 255.0;
 
 @group(2) @binding(0) var<uniform> material_params: MaterialParams;
@@ -52,6 +56,10 @@ const F0_METAL: f32 = 230.0 / 255.0;
 @group(2) @binding(4) var tex_normal: texture_2d_array<f32>;
 @group(2) @binding(5) var tex_specular: texture_2d_array<f32>;
 @group(2) @binding(6) var tex_sampler: sampler;
+/// World-space layers of natural materials (world_span × world_span m each).
+@group(2) @binding(7) var tex_world_albedo: texture_2d_array<f32>;
+@group(2) @binding(8) var tex_world_normal: texture_2d_array<f32>;
+@group(2) @binding(9) var tex_world_specular: texture_2d_array<f32>;
 
 /// Tangent frame of a voxel face: T = +u direction, B = "image up" (−v). Chosen so no
 /// face is mirrored (T × B = N) and side faces have image-up = world-up.
@@ -122,6 +130,10 @@ fn regionVariant(cell: vec3i, material: u32, count: u32) -> u32 {
 struct FaceMapping {
   layer: u32,
   flags: u32,
+  /// Sampled from the world-space arrays (natural materials).
+  world: bool,
+  /// World units → UV (1 per block face, 1 / world_span for world-space layers).
+  uv_scale: f32,
   /// UV in the (possibly rotated) texture, per block face [0, 1]².
   uv: vec2f,
   /// World directions of +u and image-up after rotation.
@@ -145,6 +157,22 @@ fn faceMapping(material: u32, cell: vec3i, face: u32, local: vec3f) -> FaceMappi
   m.layer = info.first_layer + variant;
   m.flags = info.flags;
   m.n = frame.n;
+  m.world = false;
+  m.uv_scale = 1.0;
+  if ((info.flags & MATERIAL_WORLD) != 0u && material_params.world_enabled != 0u) {
+    // Natural material: UV from the world position on the face plane, one layer per
+    // world_span × world_span m, no per-block rotation — continuous across blocks, so no
+    // block grid. The cell is reduced modulo the span first (exact, small numbers).
+    let span = i32(material_params.world_span);
+    let q = vec3f(((cell % span) + span) % span) + local;
+    m.world = true;
+    m.uv_scale = 1.0 / material_params.world_span;
+    m.layer = (info.flags >> MATERIAL_WORLD_FIRST_SHIFT) + variant;
+    m.uv = vec2f(dot(q, frame.t), -dot(q, frame.b)) * m.uv_scale;
+    m.t = frame.t;
+    m.b = frame.b;
+    return m;
+  }
   let p = local - 0.5;
   var uv = vec2f(dot(p, frame.t), -dot(p, frame.b));
   var t = frame.t;
@@ -168,7 +196,29 @@ fn faceMapping(material: u32, cell: vec3i, face: u32, local: vec3f) -> FaceMappi
 
 /// Converts a world-space vector in the face plane to UV units.
 fn toUv(m: FaceMapping, v: vec3f) -> vec2f {
-  return vec2f(dot(v, m.t), -dot(v, m.b));
+  return vec2f(dot(v, m.t), -dot(v, m.b)) * m.uv_scale;
+}
+
+// Sampling of the mapped layer from the per-face or the world-space arrays.
+fn sampleAlbedo(m: FaceMapping, uv: vec2f, g: Gradients) -> vec4f {
+  if (m.world) {
+    return textureSampleGrad(tex_world_albedo, tex_sampler, uv, m.layer, g.ddx, g.ddy);
+  }
+  return textureSampleGrad(tex_albedo, tex_sampler, uv, m.layer, g.ddx, g.ddy);
+}
+
+fn sampleNormal(m: FaceMapping, uv: vec2f, g: Gradients) -> vec4f {
+  if (m.world) {
+    return textureSampleGrad(tex_world_normal, tex_sampler, uv, m.layer, g.ddx, g.ddy);
+  }
+  return textureSampleGrad(tex_normal, tex_sampler, uv, m.layer, g.ddx, g.ddy);
+}
+
+fn sampleSpecular(m: FaceMapping, uv: vec2f, g: Gradients) -> vec4f {
+  if (m.world) {
+    return textureSampleGrad(tex_world_specular, tex_sampler, uv, m.layer, g.ddx, g.ddy);
+  }
+  return textureSampleGrad(tex_specular, tex_sampler, uv, m.layer, g.ddx, g.ddy);
 }
 
 /// Texture-space footprint of a ray cone of width `width` hitting the face along `dir`:
@@ -212,7 +262,7 @@ fn parallaxUv(m: FaceMapping, dir: vec3f, g: Gradients) -> vec2f {
   var d = 0.0;
   var prev_gap = 0.0;
   for (var i = 0u; i <= steps; i++) {
-    let surface = 1.0 - textureSampleGrad(tex_normal, tex_sampler, uv, m.layer, g.ddx, g.ddy).a;
+    let surface = 1.0 - sampleNormal(m, uv, g).a;
     let gap = d - surface;
     if (gap >= 0.0) {
       // Interpolate between the last point above and the first point below the surface:
@@ -250,9 +300,9 @@ fn shadeSurface(material: u32, cell: vec3i, face: u32, local: vec3f, dir: vec3f,
   if ((m.flags & MATERIAL_POM) != 0u && material_params.pom_depth > 0.0 && t < material_params.pom_max_distance) {
     uv = parallaxUv(m, dir, g);
   }
-  let a = textureSampleGrad(tex_albedo, tex_sampler, uv, m.layer, g.ddx, g.ddy);
-  let nm = textureSampleGrad(tex_normal, tex_sampler, uv, m.layer, g.ddx, g.ddy);
-  let sp = textureSampleGrad(tex_specular, tex_sampler, uv, m.layer, g.ddx, g.ddy);
+  let a = sampleAlbedo(m, uv, g);
+  let nm = sampleNormal(m, uv, g);
+  let sp = sampleSpecular(m, uv, g);
 
   let xy = nm.xy * 2.0 - 1.0;
   let ts = vec3f(xy, sqrt(max(1.0 - dot(xy, xy), 0.0)));

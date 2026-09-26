@@ -190,6 +190,7 @@ export class DebugOverlay {
     this.buildBrickmapControls(hooks);
     this.buildCameraControls(hooks);
     this.buildMaterialControls(hooks);
+    this.buildDetailControls();
     this.buildSkyControls(hooks);
     this.buildGiControls(hooks);
     this.buildExposureControls();
@@ -412,6 +413,13 @@ export class DebugOverlay {
   }
 
   private readonly materialValues = { source: '', memoryMB: '0', primary: '–', probe: '–' };
+
+  private buildDetailControls(): void {
+    const d = config.detail;
+    const f = this.gui.addFolder('Detail');
+    f.add(d, 'worldTextures').name('world-space textures (natural)');
+    f.close();
+  }
 
   private buildMaterialControls(hooks: DebugOverlayHooks): void {
     const v = this.materialValues;

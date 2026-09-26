@@ -7,8 +7,10 @@ export interface TextureManifest {
   version: number;
   kinds: readonly string[];
   layers: { material: string; variant: number; source: string }[];
-  materials: Record<string, { firstLayer: number; count: number; rotate: boolean; pom: boolean; alphaTest: boolean }>;
+  materials: Record<string, { firstLayer: number; count: number; rotate: boolean; pom: boolean; alphaTest: boolean; worldFirstLayer?: number }>;
   packs: Record<string, { file: string; bytes: number }>;
+  /** World-space layers of natural materials: `span` m each, span × resolution pixels. */
+  world?: { span: number; layers: number; packs: Record<string, { file: string; bytes: number }> };
 }
 
 export interface MaterialStats {
@@ -24,6 +26,9 @@ const KIND_COUNT = 3;
 const FLAG_ROTATE = 1;
 const FLAG_POM = 2;
 const FLAG_ALPHA_TEST = 4;
+/** Has world-space layers; their first index is stored in flags bits 8+ (material.wgsl). */
+const FLAG_WORLD = 8;
+const WORLD_FIRST_SHIFT = 8;
 // MaterialParams in material.wgsl: 7 scalars + pad → 32 bytes.
 const PARAMS_SIZE = 48;
 const TEXTURE_BASE = `${import.meta.env.BASE_URL}textures/`;
@@ -35,6 +40,8 @@ export interface LayerSet {
   pack: Uint8Array;
   materials: { firstLayer: number; count: number; flags: number }[];
   source: MaterialStats['source'];
+  /** World-space layers (natural materials), if packed. */
+  world?: { span: number; resolution: number; layers: number; pack: Uint8Array };
 }
 
 /**
@@ -44,6 +51,9 @@ export interface LayerSet {
  */
 export class MaterialSystem {
   private arrays: GPUTexture[] = [];
+  /** World-space arrays (albedo, normal, specular); 1×1 stand-ins when not packed. */
+  private worldArrays: GPUTexture[] = [];
+  private worldSpan = 1;
   private sampler!: GPUSampler;
   private readonly params: GPUBuffer;
   private materialTable!: GPUBuffer;
@@ -133,11 +143,13 @@ export class MaterialSystem {
     f32[6] = t.pomMaxDistance;
     f32[7] = t.variantRegionScale;
     f32[8] = t.variantWarp;
+    f32[9] = this.worldSpan;
+    u32[10] = config.detail.worldTextures && this.worldArrays[0]!.width > 1 ? 1 : 0;
     this.device.queue.writeBuffer(this.params, 0, this.paramData);
   }
 
   /** Bind group for @group(2); `bindings` = the material.wgsl bindings the pipeline uses. */
-  bindGroup(layout: GPUBindGroupLayout, bindings: readonly number[] = [0, 1, 2, 3, 4, 5, 6]): GPUBindGroup {
+  bindGroup(layout: GPUBindGroupLayout, bindings: readonly number[] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]): GPUBindGroup {
     const cached = this.bindGroups.get(layout);
     if (cached && cached.version === this.version) return cached.group;
     const [albedo, normal, specular] = this.arrays;
@@ -150,6 +162,7 @@ export class MaterialSystem {
       normal.createView({ dimension: '2d-array' }),
       specular.createView({ dimension: '2d-array' }),
       this.sampler,
+      ...this.worldArrays.map((t) => t.createView({ dimension: '2d-array' })),
     ];
     const group = this.device.createBindGroup({
       label: 'materials',
@@ -173,38 +186,72 @@ export class MaterialSystem {
       const materials = MATERIAL_NAMES.map((name) => {
         const info = m.materials[name];
         if (!info) throw new Error(`manifest has no material "${name}"`);
-        const flags = (info.rotate ? FLAG_ROTATE : 0) | (info.pom ? FLAG_POM : 0) | (info.alphaTest ? FLAG_ALPHA_TEST : 0);
+        let flags = (info.rotate ? FLAG_ROTATE : 0) | (info.pom ? FLAG_POM : 0) | (info.alphaTest ? FLAG_ALPHA_TEST : 0);
+        if (m.world && info.worldFirstLayer !== undefined) flags |= FLAG_WORLD | (info.worldFirstLayer << WORLD_FIRST_SHIFT);
         return { firstLayer: info.firstLayer, count: info.count, flags };
       });
-      return { resolution, layers: m.layers.length, pack: bytes, materials, source: 'ambientCG' };
+      const world = await this.loadWorldPack(resolution);
+      return { resolution, layers: m.layers.length, pack: bytes, materials, source: 'ambientCG', ...(world && { world }) };
     } catch (err) {
       console.warn(`[materials] could not load ${pack.file}:`, err);
       return null;
     }
   }
 
-  private upload(set: LayerSet): void {
-    for (const t of this.arrays) t.destroy();
-    const { resolution: res, layers } = set;
+  /** World pack for `resolution` (null without one; natural materials then use their
+   *  per-face layers). */
+  private async loadWorldPack(resolution: number): Promise<LayerSet['world'] | null> {
+    const w = this.manifest?.world;
+    const pack = w?.packs[String(resolution)];
+    if (!w || !pack) return null;
+    try {
+      const res = await fetch(`${TEXTURE_BASE}${pack.file}`);
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      const size = resolution * w.span;
+      const expected = KIND_COUNT * w.layers * size * size * 4;
+      if (bytes.byteLength !== expected) throw new Error(`size ${bytes.byteLength}, expected ${expected}`);
+      return { span: w.span, resolution: size, layers: w.layers, pack: bytes };
+    } catch (err) {
+      console.warn(`[materials] could not load ${pack.file}:`, err);
+      return null;
+    }
+  }
+
+  /** Three rgba8 texture arrays (albedo, normal, specular) with generated mips. */
+  private createArrays(label: string, res: number, layers: number, pack: Uint8Array | null): GPUTexture[] {
     const mips = Math.log2(res) + 1;
     const layerBytes = res * res * 4;
-    this.arrays = ['albedo', 'normal', 'specular'].map((kind, k) => {
+    const arrays = ['albedo', 'normal', 'specular'].map((kind, k) => {
       const tex = this.device.createTexture({
-        label: `material-${kind}`,
+        label: `${label}-${kind}`,
         size: { width: res, height: res, depthOrArrayLayers: layers },
         mipLevelCount: mips,
         format: 'rgba8unorm',
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_DST,
       });
-      this.device.queue.writeTexture(
-        { texture: tex },
-        set.pack.subarray(k * layers * layerBytes, (k + 1) * layers * layerBytes),
-        { bytesPerRow: res * 4, rowsPerImage: res },
-        { width: res, height: res, depthOrArrayLayers: layers },
-      );
+      if (pack) {
+        this.device.queue.writeTexture(
+          { texture: tex },
+          pack.subarray(k * layers * layerBytes, (k + 1) * layers * layerBytes),
+          { bytesPerRow: res * 4, rowsPerImage: res },
+          { width: res, height: res, depthOrArrayLayers: layers },
+        );
+      }
       return tex;
     });
-    this.generateMips(mips, layers);
+    if (pack && mips > 1) this.generateMips(arrays, mips, layers);
+    return arrays;
+  }
+
+  private upload(set: LayerSet): void {
+    for (const t of [...this.arrays, ...this.worldArrays]) t.destroy();
+    const { resolution: res, layers } = set;
+    const mips = Math.log2(res) + 1;
+    this.arrays = this.createArrays('material', res, layers, set.pack);
+    const w = set.world;
+    this.worldArrays = w ? this.createArrays('material-world', w.resolution, w.layers, w.pack) : this.createArrays('material-world', 1, 1, null);
+    this.worldSpan = w?.span ?? 1;
 
     this.emissiveRadiance = meanEmission(set);
     const table = new Uint32Array(MATERIAL_NAMES.length * 4);
@@ -221,17 +268,18 @@ export class MaterialSystem {
     // Full mip chain ≈ 4/3 of the base level.
     let bytes = 0;
     for (let l = 0; l < mips; l++) bytes += KIND_COUNT * layers * Math.max(1, res >> l) ** 2 * 4;
+    if (w) for (let l = 0; l <= Math.log2(w.resolution); l++) bytes += KIND_COUNT * w.layers * Math.max(1, w.resolution >> l) ** 2 * 4;
     this.current = { source: set.source, resolution: res, layers, bytes };
     this.version++;
     console.info(`[materials] ${set.source} ${res}px, ${layers} layers, ${(bytes / 2 ** 20).toFixed(1)} MB`);
   }
 
-  private generateMips(mips: number, layers: number): void {
+  private generateMips(arrays: GPUTexture[], mips: number, layers: number): void {
     const encoder = this.device.createCommandEncoder({ label: 'mipgen' });
     const pass = encoder.beginComputePass({ label: 'mipgen' });
     pass.setPipeline(this.mipPipeline);
     const w = config.render.workgroupSize;
-    this.arrays.forEach((tex, kind) => {
+    arrays.forEach((tex, kind) => {
       for (let level = 1; level < mips; level++) {
         pass.setBindGroup(
           0,

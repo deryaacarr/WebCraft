@@ -34,6 +34,7 @@ import {
 import {
   TEXTURE_RESOLUTIONS,
   TEXTURE_SPEC,
+  WORLD_SPAN,
   type AmbientCgSource,
   type GrassSideSource,
   type LeavesSource,
@@ -48,7 +49,7 @@ const WORK = 512;
 const SOURCE = 1024;
 const KINDS = ['albedo', 'normal', 'specular'] as const;
 
-/** A material layer at working resolution; every map is WORK². */
+/** A material layer at working resolution; every map is size² (WORK per metre covered). */
 interface Layer {
   color: FloatImage; // 4: sRGB + opacity
   normal: FloatImage; // 3: vector
@@ -60,18 +61,18 @@ interface Layer {
   sss: FloatImage;
 }
 
-function blankLayer(): Layer {
-  const n = createImage(WORK, WORK, 3);
-  for (let i = 0; i < WORK * WORK; i++) n.data[i * 3 + 2] = 1;
+function blankLayer(size = WORK): Layer {
+  const n = createImage(size, size, 3);
+  for (let i = 0; i < size * size; i++) n.data[i * 3 + 2] = 1;
   return {
-    color: createImage(WORK, WORK, 4, 1),
+    color: createImage(size, size, 4, 1),
     normal: n,
-    ao: createImage(WORK, WORK, 1, 1),
-    height: createImage(WORK, WORK, 1, 0.5),
-    roughness: createImage(WORK, WORK, 1, 0.8),
-    metal: createImage(WORK, WORK, 1, 0),
-    emission: createImage(WORK, WORK, 1, 0),
-    sss: createImage(WORK, WORK, 1, 0),
+    ao: createImage(size, size, 1, 1),
+    height: createImage(size, size, 1, 0.5),
+    roughness: createImage(size, size, 1, 0.8),
+    metal: createImage(size, size, 1, 0),
+    emission: createImage(size, size, 1, 0),
+    sss: createImage(size, size, 1, 0),
   };
 }
 
@@ -110,16 +111,23 @@ function luminance(rgb: FloatImage): FloatImage {
   return out;
 }
 
-async function loadAmbientCg(src: AmbientCgSource | { id: string; crop: number }): Promise<Layer> {
-  const region = { size: Math.round(SOURCE * src.crop), out: WORK };
-  const retile = src.crop < 1;
+/**
+ * An ambientCG material covering `span` metres (1 = one block face). The source region is
+ * crop × span of its edge; when that exceeds the source, the whole (natively tileable)
+ * source is used, stretched to the span.
+ */
+async function loadAmbientCg(src: AmbientCgSource | { id: string; crop: number }, span = 1): Promise<Layer> {
+  const size = WORK * span;
+  const fraction = Math.min(1, src.crop * span);
+  const region = { size: Math.round(SOURCE * fraction), out: size };
+  const retile = fraction < 1;
   const tile = (img: FloatImage | null, isNormal = false) => (img && retile ? seamBlend(img, 0.25, isNormal) : img);
-  const layer = blankLayer();
+  const layer = blankLayer(size);
 
   const color = tile(await loadMap(src.id, 'Color', 3, region));
   if (!color) throw new Error(`${src.id}: missing Color map (run npm run textures:fetch)`);
   const opacity = tile(await loadMap(src.id, 'Opacity', 1, region));
-  for (let i = 0; i < WORK * WORK; i++) {
+  for (let i = 0; i < size * size; i++) {
     layer.color.data.set([color.data[i * 3]!, color.data[i * 3 + 1]!, color.data[i * 3 + 2]!, opacity ? opacity.data[i]! : 1], i * 4);
   }
   const normal = await loadMap(src.id, 'NormalGL', 3, region);
@@ -340,7 +348,7 @@ async function buildVariant(v: VariantSource): Promise<Layer> {
 
 /** The three RGBA8 layers at working resolution. */
 function encode(layer: Layer): Record<(typeof KINDS)[number], Uint8Array> {
-  const N = WORK * WORK;
+  const N = layer.color.width * layer.color.height;
   const albedo = new Uint8Array(N * 4);
   const normal = new Uint8Array(N * 4);
   const specular = new Uint8Array(N * 4);
@@ -390,9 +398,18 @@ function downsample(src: Uint8Array, size: number, factor: number, alphaWeighted
 async function main(): Promise<void> {
   const t0 = performance.now();
   const layers: { material: string; variant: number; source: string; data: ReturnType<typeof encode> }[] = [];
-  const materials: Record<string, { firstLayer: number; count: number; rotate: boolean; pom: boolean; alphaTest: boolean }> = {};
+  // World-space layers (WORLD_SPAN m per layer) of the natural materials, in their own packs.
+  const worldLayers: typeof layers = [];
+  const materials: Record<string, { firstLayer: number; count: number; rotate: boolean; pom: boolean; alphaTest: boolean; worldFirstLayer?: number }> = {};
   for (const [material, spec] of Object.entries(TEXTURE_SPEC)) {
     materials[material] = { firstLayer: layers.length, count: spec.variants.length, rotate: spec.rotate, pom: spec.pom, alphaTest: spec.alphaTest };
+    if (spec.world) {
+      materials[material]!.worldFirstLayer = worldLayers.length;
+      for (const [i, v] of spec.variants.entries()) {
+        if (v.kind !== 'ambientcg') throw new Error(`${material}: world-space layers need ambientCG sources`);
+        worldLayers.push({ material, variant: i, source: v.id, data: encode(await loadAmbientCg(v, WORLD_SPAN)) });
+      }
+    }
     const built: Layer[] = [];
     const labels: string[] = [];
     for (const v of spec.variants) {
@@ -420,6 +437,21 @@ async function main(): Promise<void> {
     writeFileSync(join(OUT, file), pack);
     packs[res] = { file, bytes: pack.byteLength };
   }
+  // World packs: WORLD_SPAN × res pixels per layer (same texel density per metre).
+  const worldPacks: Record<number, { file: string; bytes: number }> = {};
+  for (const res of TEXTURE_RESOLUTIONS) {
+    const size = res * WORLD_SPAN;
+    const layerBytes = size * size * 4;
+    const pack = new Uint8Array(KINDS.length * worldLayers.length * layerBytes);
+    KINDS.forEach((kind, k) => {
+      worldLayers.forEach((layer, l) => {
+        pack.set(downsample(layer.data[kind], WORK * WORLD_SPAN, WORK / res, kind === 'albedo'), (k * worldLayers.length + l) * layerBytes);
+      });
+    });
+    const file = `world-${res}.bin`;
+    writeFileSync(join(OUT, file), pack);
+    worldPacks[res] = { file, bytes: pack.byteLength };
+  }
 
   const manifest = {
     version: 1,
@@ -427,6 +459,7 @@ async function main(): Promise<void> {
     layers: layers.map(({ material, variant, source }) => ({ material, variant, source })),
     materials,
     packs,
+    world: { span: WORLD_SPAN, layers: worldLayers.length, packs: worldPacks },
   };
   writeFileSync(join(OUT, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 
@@ -445,6 +478,7 @@ async function main(): Promise<void> {
 
   const mb = (b: number) => (b / 2 ** 20).toFixed(1);
   console.log(`${layers.length} layers → ${TEXTURE_RESOLUTIONS.map((r) => `${r}px ${mb(packs[r]!.bytes)} MB`).join(', ')}`);
+  console.log(`${worldLayers.length} world layers (${WORLD_SPAN} m) → ${TEXTURE_RESOLUTIONS.map((r) => `${r * WORLD_SPAN}px ${mb(worldPacks[r]!.bytes)} MB`).join(', ')}`);
   console.log(`done in ${((performance.now() - t0) / 1000).toFixed(1)} s → ${OUT}`);
 }
 

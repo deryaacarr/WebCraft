@@ -237,6 +237,12 @@ export const config = {
     /** Domain warp of the region noise (in feature sizes): bends regions into veins. */
     variantWarp: 0.6,
   },
+  /** Natural material detail (stage 8.5). Each feature can be toggled in the "Detail" panel. */
+  detail: {
+    /** Natural materials (stone, dirt, gravel, sand) sample world-space layers covering
+     *  2 × 2 m, so walls read as one surface instead of a block grid. */
+    worldTextures: true,
+  },
   sky: {
     /** Time of day at start (hours, 12 = solar noon). */
     timeOfDay: 9.5,

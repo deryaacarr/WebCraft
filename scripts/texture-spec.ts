@@ -45,7 +45,13 @@ export interface MaterialSpec {
   pom: boolean;
   /** Pixels with opacity below the cutoff let rays through (leaves). */
   alphaTest: boolean;
+  /** Natural material: also packed as world-space layers covering WORLD_SPAN × WORLD_SPAN
+   *  metres (sampled from world coordinates, no per-block grid). */
+  world?: boolean;
 }
+
+/** Edge (m) of the area one world-space layer covers (same texel density as block layers). */
+export const WORLD_SPAN = 2;
 
 const acg = (id: string, crop: number): AmbientCgSource => ({ kind: 'ambientcg', id, crop });
 
@@ -61,11 +67,11 @@ export const TEXTURE_SPEC: Record<MaterialName, MaterialSpec> = {
     pom: false,
     alphaTest: false,
   },
-  dirt: { variants: [acg('Ground048', 0.7), acg('Ground023', 0.5)], rotate: true, pom: true, alphaTest: false },
-  stone: { variants: [acg('Rock030', 0.5), acg('Rock050', 0.5), acg('Rock060', 0.5)], rotate: true, pom: false, alphaTest: false },
+  dirt: { variants: [acg('Ground048', 0.7), acg('Ground023', 0.5)], rotate: true, pom: true, alphaTest: false, world: true },
+  stone: { variants: [acg('Rock030', 0.5), acg('Rock050', 0.5), acg('Rock060', 0.5)], rotate: true, pom: false, alphaTest: false, world: true },
   cobblestone: { variants: [acg('PavingStones119', 1), acg('PavingStones046', 1)], rotate: true, pom: true, alphaTest: false },
-  gravel: { variants: [acg('Gravel023', 0.67), acg('Gravel040', 0.5)], rotate: true, pom: true, alphaTest: false },
-  sand: { variants: [acg('Ground054', 0.3), acg('Ground080', 0.5)], rotate: true, pom: false, alphaTest: false },
+  gravel: { variants: [acg('Gravel023', 0.67), acg('Gravel040', 0.5)], rotate: true, pom: true, alphaTest: false, world: true },
+  sand: { variants: [acg('Ground054', 0.3), acg('Ground080', 0.5)], rotate: true, pom: false, alphaTest: false, world: true },
   water: { variants: [{ kind: 'procedural', generator: 'water', seed: 1 }], rotate: true, pom: false, alphaTest: false },
   oak_log_top: {
     variants: [
