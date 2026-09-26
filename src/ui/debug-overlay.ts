@@ -338,6 +338,7 @@ export class DebugOverlay {
     f.add(l.flicker, 'speed', 0, 10, 0.1).name('flicker speed');
     f.add(l, 'subsurface', 0, 2, 0.05).name('leaf translucency');
     f.add(l, 'leafTransmission', 0, 1, 0.05).name('leaf transmission');
+    f.add(l, 'maxLeafLayers', 1, 12, 1).name('leaf layers light passes');
     f.add(l, 'model', { physical: 'physical', 'debug-fill': 'debug-fill' }).name('lighting');
     f.add(l.debugFill, 'maxDirectToSky', 0, 20, 0.5).name('fill: max sun : sky');
     f.add(l.debugFill, 'ambientFloor', 0, 0.5, 0.01).name('fill: ambient floor');

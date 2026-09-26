@@ -336,6 +336,8 @@ export const config = {
     subsurface: 0.5,
     /** Fraction of light a leaf voxel lets through for shadow / sky rays. */
     leafTransmission: 0.3,
+    /** Shadow rays carry light through at most this many opaque leaf texels. */
+    maxLeafLayers: 6,
     /** 'physical': sun + atmosphere only. 'debug-fill': adds the non-physical fill lights
      *  below, only for comparison (not a fix — GI will supply bounce light). */
     model: 'physical' as 'physical' | 'debug-fill',

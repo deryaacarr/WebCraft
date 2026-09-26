@@ -8,7 +8,7 @@
 //                texel does not stop the ray but multiplies its light by
 //                `leaf_transmission` (light passing through leaves) — the same result as
 //                restarting the ray behind each leaf voxel, without the restarts. Once the
-//                light left is negligible the ray stops.
+//                light left is negligible (after `maxLeafLayers` opaque texels) the ray stops.
 //   sky rays     stop at the first leaf texel and return `leaf_transmission` (short-range
 //                occlusion only, fewer steps).
 // (A coarser alpha-test LOD from the primary pixel footprint was tried: no faster, and it
@@ -30,7 +30,9 @@ struct VisibilityParams {
   leaf_transmission: f32,
   /// 0 while GI is on: GI brings the sky light (with real occlusion), no sky ray needed.
   sky_enabled: u32,
-  _pad2: u32,
+  /// Shadow rays stop once the light left behind leaves drops below this
+  /// (leaf_transmission ^ maxLeafLayers, config).
+  min_leaf_light: f32,
 };
 
 /// Per-invocation state shared with traceOpaque (it has no extra parameters).
@@ -48,9 +50,6 @@ fn tracedOffset(frame: u32) -> vec2u {
 
 override WORKGROUP_X: u32 = 8u;
 override WORKGROUP_Y: u32 = 8u;
-/// Shadow rays stop once the light left behind leaves drops below this (≈ 4 opaque leaf
-/// texels at leaf_transmission 0.3).
-const MIN_LEAF_LIGHT: f32 = 0.01;
 /// Offset of ray origins from the surface (blocks): leaves the hit voxel cleanly.
 const SURFACE_OFFSET: f32 = 1e-3;
 
@@ -61,13 +60,22 @@ const SURFACE_OFFSET: f32 = 1e-3;
 @group(0) @binding(4) var<uniform> params: VisibilityParams;
 
 fn traceOpaque(id: u32, cell: vec3i, normal: vec3i, local: vec3f, t: f32, dir: vec3f) -> bool {
-  if (all(normal == vec3i(0))) {
-    return true;
-  }
-  let face = faceIndex(normal);
+  let inside = all(normal == vec3i(0));
+  let face = select(faceIndex(normal), 2u, inside);
   let material = faceMaterial(id, face);
   if ((materials[material].flags & MATERIAL_ALPHA_TEST) == 0u) {
     return true;
+  }
+  if (inside) {
+    // The ray starts inside a leaf voxel: an inner leaf seen through the holes of the one
+    // in front. No face to alpha test; count the voxel as one leaf layer (treating it as
+    // solid left those inner leaves black).
+    if (sky_ray != 0u) {
+      stopped_by_leaf = true;
+      return true;
+    }
+    leaf_light *= params.leaf_transmission;
+    return leaf_light < params.min_leaf_light;
   }
   let m = faceMapping(material, cell, face, local);
   let lod = coneLod(dir, m.n, t * material_params.pixel_spread);
@@ -80,7 +88,7 @@ fn traceOpaque(id: u32, cell: vec3i, normal: vec3i, local: vec3f, t: f32, dir: v
   }
   // An opaque leaf texel attenuates the light and the ray goes on, unless little is left.
   leaf_light *= params.leaf_transmission;
-  return leaf_light < MIN_LEAF_LIGHT;
+  return leaf_light < params.min_leaf_light;
 }
 
 fn hash(v: vec3u) -> u32 {
