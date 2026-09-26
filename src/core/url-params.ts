@@ -9,6 +9,7 @@ import { DEBUG_VIEWS, type DebugView } from '../config';
  *   &tile=4                      depth prepass tile edge (benchmarking)
  *   &dmax=8                      distance field max distance (benchmarking)
  *   &time=18.5                   time of day in hours; also pauses the clock
+ *   &spin=90&fly=20              scripted camera turn (°/s) and forward flight (blocks/s)
  */
 export interface UrlOverrides {
   camera?: { position: [number, number, number]; yawDeg: number; pitchDeg: number };
@@ -18,6 +19,8 @@ export interface UrlOverrides {
   prepassTile?: number;
   distanceMax?: number;
   timeOfDay?: number;
+  cameraSpin?: number;
+  cameraFly?: number;
 }
 
 export function parseUrlOverrides(search: string): UrlOverrides {
@@ -42,6 +45,10 @@ export function parseUrlOverrides(search: string): UrlOverrides {
   if (tile) out.prepassTile = tile;
   const time = Number(params.get('time'));
   if (params.has('time') && Number.isFinite(time)) out.timeOfDay = ((time % 24) + 24) % 24;
+  const spin = Number(params.get('spin'));
+  if (params.has('spin') && Number.isFinite(spin)) out.cameraSpin = spin;
+  const fly = Number(params.get('fly'));
+  if (params.has('fly') && Number.isFinite(fly)) out.cameraFly = fly;
   const dmax = positiveInt('dmax');
   if (dmax) out.distanceMax = Math.min(dmax, 254);
 

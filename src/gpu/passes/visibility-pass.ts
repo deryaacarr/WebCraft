@@ -17,10 +17,17 @@ export class VisibilityPass implements RenderPass {
 
   private tracePipeline!: GPUComputePipeline;
   private temporalPipeline!: GPUComputePipeline;
+  private spatialPipeline!: GPUComputePipeline;
+  /** Spatially filtered visibility (what lighting reads). */
+  private filtered: GPUTexture | null = null;
+  private spatialGroups: [GPUBindGroup, GPUBindGroup] | null = null;
   private layouts!: { brickmap: GPUBindGroupLayout; materials: GPUBindGroupLayout; sky: GPUBindGroupLayout };
   private readonly params: GPUBuffer;
   private readonly temporalParams: GPUBuffer;
   private raw: GPUTexture | null = null;
+  /** Previous frame's G-buffer word and depth, for history validation. */
+  private prevGbuffer: GPUTexture | null = null;
+  private prevDepth: GPUTexture | null = null;
   private history: [GPUTexture, GPUTexture] | null = null;
   private traceGroup: GPUBindGroup | null = null;
   private temporalGroups: [GPUBindGroup, GPUBindGroup] | null = null;
@@ -38,19 +45,12 @@ export class VisibilityPass implements RenderPass {
   ) {
     const uniform = (label: string, size = 16) => device.createBuffer({ label, size, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.params = uniform('visibility-params', 32);
-    this.temporalParams = uniform('temporal-params');
+    this.temporalParams = uniform('temporal-params', 32);
   }
 
-  /** Index (0/1) of the history texture holding the last executed frame's result. */
-  get outputIndex(): number {
-    return this.current;
-  }
-
-  /** History texture 0 or 1 (consumers pre-build bind groups for both). */
-  historyTexture(index: number): GPUTexture {
-    const t = this.history?.[index];
-    if (!t) throw new Error('visibility pass not sized');
-    return t;
+  /** Filtered visibility of the last executed frame (r light, g sky, a history length). */
+  get output(): GPUTexture | null {
+    return this.filtered;
   }
 
   async init(): Promise<void> {
@@ -59,7 +59,7 @@ export class VisibilityPass implements RenderPass {
       createShaderModule(this.device, 'temporal.wgsl'),
     ]);
     const [wx, wy] = this.workgroup;
-    [this.tracePipeline, this.temporalPipeline] = await Promise.all([
+    [this.tracePipeline, this.temporalPipeline, this.spatialPipeline] = await Promise.all([
       this.device.createComputePipelineAsync({
         label: 'visibility',
         layout: 'auto',
@@ -69,6 +69,11 @@ export class VisibilityPass implements RenderPass {
         label: 'temporal',
         layout: 'auto',
         compute: { module: temporal, entryPoint: 'main', constants: { WORKGROUP_X: wx, WORKGROUP_Y: wy } },
+      }),
+      this.device.createComputePipelineAsync({
+        label: 'visibility-spatial',
+        layout: 'auto',
+        compute: { module: temporal, entryPoint: 'spatial', constants: { WORKGROUP_X: wx, WORKGROUP_Y: wy } },
       }),
     ]);
     this.layouts = {
@@ -81,7 +86,11 @@ export class VisibilityPass implements RenderPass {
   resize(width: number, height: number): void {
     const g = this.gbuffer;
     if (!g.gbuffer0 || !g.depth || !g.motion) return;
-    for (const t of [this.raw, ...(this.history ?? [])]) t?.destroy();
+    for (const t of [this.raw, this.prevGbuffer, this.prevDepth, this.filtered, ...(this.history ?? [])]) t?.destroy();
+    const copyTarget = (label: string, format: GPUTextureFormat) =>
+      this.device.createTexture({ label, size: { width, height }, format, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    this.prevGbuffer = copyTarget('prev-gbuffer0', 'rgba32uint');
+    this.prevDepth = copyTarget('prev-depth', 'r32float');
     const make = (label: string) =>
       this.device.createTexture({
         label,
@@ -90,6 +99,7 @@ export class VisibilityPass implements RenderPass {
         usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
       });
     this.raw = make('visibility-raw');
+    this.filtered = make('visibility-filtered');
     this.history = [make('visibility-history-a'), make('visibility-history-b')];
     this.traceGroup = this.device.createBindGroup({
       label: 'visibility',
@@ -114,10 +124,27 @@ export class VisibilityPass implements RenderPass {
           { binding: 4, resource: g.depth!.createView() },
           { binding: 5, resource: g.motion!.createView() },
           { binding: 6, resource: write.createView() },
+          { binding: 7, resource: g.gbuffer0!.createView() },
+          { binding: 8, resource: this.prevGbuffer!.createView() },
+          { binding: 9, resource: this.prevDepth!.createView() },
         ],
       });
     const [a, b] = this.history;
     this.temporalGroups = [temporal(a, b), temporal(b, a)];
+    const spatial = (source: GPUTexture) =>
+      this.device.createBindGroup({
+        label: 'visibility-spatial',
+        layout: this.spatialPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.camera() } },
+          { binding: 1, resource: { buffer: this.temporalParams } },
+          { binding: 4, resource: g.depth!.createView() },
+          { binding: 7, resource: g.gbuffer0!.createView() },
+          { binding: 10, resource: source.createView() },
+          { binding: 11, resource: this.filtered!.createView() },
+        ],
+      });
+    this.spatialGroups = [spatial(a), spatial(b)];
   }
 
   execute(ctx: FrameContext): void {
@@ -127,10 +154,15 @@ export class VisibilityPass implements RenderPass {
     const p = new ArrayBuffer(32);
     new Float32Array(p).set([l.shadowDistance, l.skyVisibilityDistance]);
     new Uint32Array(p).set([config.trace.maxSteps, block, l.skyVisibilitySteps], 2);
+    new Float32Array(p)[5] = l.leafTransmission;
     this.device.queue.writeBuffer(this.params, 0, p);
-    const t = new ArrayBuffer(16);
-    new Float32Array(t).set([l.temporalFrames, l.temporalDepthTolerance]);
-    new Uint32Array(t)[2] = block;
+    // How fast the camera moves this frame (0 still … 1 fast): translation plus rotation.
+    const c = ctx.camera;
+    const turn = Math.acos(Math.min(1, c.forward[0] * c.prevForward[0] + c.forward[1] * c.prevForward[1] + c.forward[2] * c.prevForward[2]));
+    const cameraMotion = Math.min(1, Math.hypot(...c.prevDelta) / l.historyCameraSpeed + (turn * 180) / Math.PI / l.historyCameraTurn);
+    const t = new ArrayBuffer(32);
+    new Float32Array(t).set([l.historyStill, l.historyMoving, cameraMotion, l.historyMotionPixels, l.temporalDepthTolerance, l.historyClipK]);
+    new Uint32Array(t)[6] = block;
     this.device.queue.writeBuffer(this.temporalParams, 0, t);
 
     this.current = 1 - this.current;
@@ -148,6 +180,14 @@ export class VisibilityPass implements RenderPass {
     pass.setPipeline(this.temporalPipeline);
     pass.setBindGroup(0, this.temporalGroups[this.current]!);
     pass.dispatchWorkgroups(w, h);
+    pass.setPipeline(this.spatialPipeline);
+    pass.setBindGroup(0, this.spatialGroups![this.current]!);
+    pass.dispatchWorkgroups(w, h);
     pass.end();
+    // Keep this frame's surface identity and depth for the next frame's validation.
+    const g = this.gbuffer;
+    const size = { width: g.width, height: g.height };
+    ctx.encoder.copyTextureToTexture({ texture: g.gbuffer0! }, { texture: this.prevGbuffer! }, size);
+    ctx.encoder.copyTextureToTexture({ texture: g.depth! }, { texture: this.prevDepth! }, size);
   }
 }

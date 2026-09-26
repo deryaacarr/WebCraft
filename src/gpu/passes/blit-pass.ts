@@ -1,3 +1,4 @@
+import { config } from '../../config';
 import { createShaderModule } from '../shader';
 import type { FrameContext, RenderPass } from './pass';
 
@@ -9,19 +10,27 @@ export class BlitPass implements RenderPass {
   private sampler!: GPUSampler;
   private bindGroup: GPUBindGroup | null = null;
   private params!: GPUBuffer;
-  private tonemap = false;
+  private tonemapKey = '';
 
   constructor(
     private readonly device: GPUDevice,
     private readonly context: GPUCanvasContext,
     private readonly format: GPUTextureFormat,
+    /** Exposure state buffer (white-balance matrix). */
+    private readonly exposureState: GPUBuffer,
   ) {}
 
-  /** ACES tone mapping for pre-exposed HDR input (lit view) vs. plain display (debug views). */
-  setTonemap(enabled: boolean): void {
-    if (enabled === this.tonemap) return;
-    this.tonemap = enabled;
-    this.device.queue.writeBuffer(this.params, 0, new Uint32Array([enabled ? 1 : 0, 0, 0, 0]));
+  /** 'none' for debug views; AgX / ACES (with white balance) for pre-exposed HDR. */
+  setTonemap(mode: 'none' | 'agx' | 'agx-punchy' | 'aces'): void {
+    const value = { none: 0, agx: 1, aces: 2, 'agx-punchy': 3 }[mode];
+    const r = config.render;
+    const key = `${value},${r.agxPunchyContrast},${r.agxPunchySaturation}`;
+    if (key === this.tonemapKey) return;
+    this.tonemapKey = key;
+    const data = new ArrayBuffer(16);
+    new Uint32Array(data)[0] = value;
+    new Float32Array(data).set([r.agxPunchyContrast, r.agxPunchySaturation], 1);
+    this.device.queue.writeBuffer(this.params, 0, data);
   }
 
   async init(): Promise<void> {
@@ -53,6 +62,7 @@ export class BlitPass implements RenderPass {
         { binding: 0, resource: source.createView() },
         { binding: 1, resource: this.sampler },
         { binding: 2, resource: { buffer: this.params } },
+        { binding: 3, resource: { buffer: this.exposureState } },
       ],
     });
   }

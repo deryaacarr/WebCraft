@@ -26,6 +26,8 @@ async function main(): Promise<void> {
   const overrides = parseUrlOverrides(location.search);
   if (overrides.view) config.debug.view = overrides.view;
   if (overrides.renderScale) config.render.renderScale = overrides.renderScale;
+  if (overrides.cameraSpin !== undefined) config.debug.cameraSpin = overrides.cameraSpin;
+  if (overrides.cameraFly !== undefined) config.debug.cameraFly = overrides.cameraFly;
   if (overrides.timeOfDay !== undefined) {
     config.sky.timeOfDay = overrides.timeOfDay;
     config.sky.paused = true;
@@ -85,6 +87,8 @@ async function main(): Promise<void> {
     onVerifyPrepass: () => renderer.verifyPrepass(),
     clock,
     skyState: () => sky.state,
+    lightingStats: () => sky.readStats(),
+    probeCenter: () => renderer.probeCenter(),
     materialStats: () => materials.stats,
     onTextureResolution: (res) => materials.load(res),
     onSamplerChange: () => materials.createSampler(),

@@ -16,10 +16,14 @@ struct VisibilityParams {
   /// 1 = every pixel every frame; 2 = one pixel per 2×2 block per frame (rotating).
   block: u32,
   sky_max_steps: u32,
-  _pad0: u32,
+  /// Fraction of light a leaf voxel lets through (on top of its alpha holes).
+  leaf_transmission: f32,
   _pad1: u32,
   _pad2: u32,
 };
+
+/// Light-carrying segments per ray: each leaf voxel crossed costs one.
+const MAX_LEAF_CROSSINGS: u32 = 4u;
 
 /// Pixel of each 2×2 block traced in a frame (rotating so all four get samples).
 fn tracedOffset(frame: u32) -> vec2u {
@@ -64,11 +68,38 @@ fn basis(n: vec3f) -> mat3x3f {
   return mat3x3f(vec3f(1.0 + s * n.x * n.x * a, s * b, -s * n.x), vec3f(b, s + n.y * n.y * a, -n.y), n);
 }
 
-/// True if a ray from `start` (camera-relative) along `dir` escapes within `distance`.
-fn unoccluded(start: vec3f, dir: vec3f, distance: f32, max_steps: u32) -> bool {
-  let cell = vec3i(floor(start));
-  let r = traceRay(cam.origin_cell + cell, start - vec3f(cell), dir, 0.0, distance, max_steps);
-  return !r.hit;
+/// Fraction of light reaching `start` (camera-relative) along `dir` within `distance`:
+/// 0 behind solid blocks; leaf voxels pass `leaf_transmission` and the ray continues.
+fn transmittance(start: vec3f, dir: vec3f, distance: f32, max_steps: u32) -> f32 {
+  var p = start;
+  var left = distance;
+  var t = 1.0;
+  for (var i = 0u; i <= MAX_LEAF_CROSSINGS; i++) {
+    let cell = vec3i(floor(p));
+    let r = traceRay(cam.origin_cell + cell, p - vec3f(cell), dir, 0.0, left, max_steps);
+    if (!r.hit) {
+      return t;
+    }
+    let face = faceIndex(select(r.normal, vec3i(0, 1, 0), all(r.normal == vec3i(0))));
+    let material = faceMaterial(r.id, face);
+    if ((materials[material].flags & MATERIAL_ALPHA_TEST) == 0u || i == MAX_LEAF_CROSSINGS) {
+      return 0.0;
+    }
+    t *= params.leaf_transmission;
+    // Continue from where the ray leaves this leaf voxel.
+    let rel = vec3f(r.cell - cam.origin_cell);
+    let step_pos = select(vec3f(0.0), vec3f(1.0), dir >= vec3f(0.0));
+    // A zero component has step_pos = 1, so its exit distance is a huge positive number.
+    let safe = select(dir, vec3f(1e-30), abs(dir) < vec3f(1e-30));
+    let exits = (rel + step_pos - p) / safe;
+    let t_exit = min(min(exits.x, exits.y), exits.z);
+    p += dir * (t_exit + SURFACE_OFFSET);
+    left -= t_exit;
+    if (left <= 0.0) {
+      return t;
+    }
+  }
+  return t;
 }
 
 @compute @workgroup_size(WORKGROUP_X, WORKGROUP_Y, 1)
@@ -100,7 +131,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let sin_t = sqrt(max(1.0 - cos_t * cos_t, 0.0));
     let phi = 2.0 * PI * r.y;
     let l = basis(sky.light_dir) * vec3f(sin_t * cos(phi), sin_t * sin(phi), cos_t);
-    sun = select(0.0, 1.0, unoccluded(start, l, params.shadow_distance, params.max_steps));
+    sun = transmittance(start, l, params.shadow_distance, params.max_steps);
   }
 
   // Sky ray: cosine-weighted around the face normal.
@@ -108,7 +139,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let sin_t = sqrt(q.x);
   let phi = 2.0 * PI * q.y;
   let d = basis(n) * vec3f(sin_t * cos(phi), sin_t * sin(phi), sqrt(1.0 - q.x));
-  let skyv = select(0.0, 1.0, unoccluded(start, d, params.sky_distance, params.sky_max_steps));
+  let skyv = transmittance(start, d, params.sky_distance, params.sky_max_steps);
 
   textureStore(output, px, vec4f(sun, skyv, 0.0, 0.0));
 }

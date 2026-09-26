@@ -25,17 +25,21 @@ struct SkyParams {
   moon_albedo: f32,
   /// 1 when the dominant light is the moon.
   light_is_moon: f32,
-  _pad: vec2f,
+  /// Debug fill only: sky ambient raised until direct : sky is at most this (0 = off).
+  max_direct_to_sky: f32,
+  _pad: f32,
 };
 
 /// Written by sky-ambient.wgsl each frame (not pre-exposed).
 struct Lighting {
   /// Illuminance of the dominant light at the viewer (after the atmosphere).
   light_illuminance: vec3f,
-  _pad0: f32,
+  /// Direct : sky ratio from the atmosphere alone, before calibration.
+  raw_direct_to_sky: f32,
   /// Irradiance from the whole sky on an upward-facing surface.
   sky_irradiance: vec3f,
-  _pad1: f32,
+  /// Direct : sky illuminance ratio on open horizontal ground after calibration.
+  direct_to_sky: f32,
 };
 
 @group(3) @binding(0) var<uniform> sky: SkyParams;
@@ -66,7 +70,11 @@ fn skyViewSample(dir: vec3f, light: vec3f, layer: u32) -> vec3f {
   let lh = light.xz;
   let lv = length(vh) * length(lh);
   let cos_az = select(1.0, dot(vh, lh) / lv, lv > 1e-6);
-  let uv = skyViewUv(atm, sky.viewer_r, dir.y, acos(clamp(cos_az, -1.0, 1.0)));
+  var uv = skyViewUv(atm, sky.viewer_r, dir.y, acos(clamp(cos_az, -1.0, 1.0)));
+  // Below the horizon lies the planet beyond the loaded world. Instead of showing that
+  // flat ground, every such direction reads the horizon row (half a texel above it): the
+  // limit of aerial perspective at great distance, so the world edge melts into the haze.
+  uv.y = min(uv.y, 0.5 - 0.5 / f32(textureDimensions(skyview_tex).y));
   return textureSampleLevel(skyview_tex, sky_sampler, uv, layer, 0.0).rgb;
 }
 

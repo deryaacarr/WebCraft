@@ -67,6 +67,13 @@ export class FlyCamera {
     this.prevYaw = this.yaw;
     this.prevPitch = this.pitch;
 
+    // Scripted motion (debug): constant turn and forward flight.
+    this.yaw += config.debug.cameraSpin * DEG * dt;
+    if (config.debug.cameraFly) {
+      const f = forwardFromYawPitch(this.yaw, this.pitch);
+      for (let a = 0; a < 3; a++) this.position[a]! += f[a]! * config.debug.cameraFly * dt;
+    }
+
     const { x: mx, y: my } = input.mouseDelta;
     const sens = config.input.mouseSensitivity;
     const maxPitch = config.camera.maxPitch * DEG;

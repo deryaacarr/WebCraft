@@ -17,6 +17,7 @@ export const DEBUG_VIEWS = [
   'material',
   'shadow',
   'skyvis',
+  'history',
   'topdown',
   'gradient',
 ] as const;
@@ -38,6 +39,11 @@ export const config = {
     /** Internal (traced) resolution relative to the canvas backing size, upscaled in the
      *  blit pass. 0.5 on a Retina canvas ≈ 1440×800 primary rays. */
     renderScale: 0.5,
+    /** Tone mapper for the lit view (AgX base / AgX punchy look / ACES fit). */
+    tonemapper: 'agx-punchy' as 'agx' | 'agx-punchy' | 'aces',
+    /** AgX punchy look, applied in AgX log space: contrast power and saturation. */
+    agxPunchyContrast: 1.15,
+    agxPunchySaturation: 1.1,
     /** Upper bound on devicePixelRatio to keep 4K/Retina displays affordable. */
     maxPixelRatio: 2.0,
     /** Workgroup edge length for 2D compute passes; must match @workgroup_size in WGSL. */
@@ -223,6 +229,31 @@ export const config = {
     pomMaxDistance: 32,
     /** Opacity below which alpha-tested texels (leaves) let rays through. */
     alphaCutoff: 0.5,
+    /**
+     * Physical albedo calibration used by `npm run textures:build`: each material's mean
+     * linear luminance (opacity-weighted) is scaled to this value. Real-world references:
+     * grass ~0.20, soil ~0.15, rock 0.25–0.35, sand ~0.40, snow ~0.80. `null` = keep
+     * (emissive / special materials). There is no snow block yet; 0.8 is the target once
+     * one exists.
+     */
+    albedoTargets: {
+      grass_top: 0.2,
+      grass_side: 0.17,
+      dirt: 0.15,
+      stone: 0.22,
+      cobblestone: 0.28,
+      gravel: 0.28,
+      sand: 0.4,
+      water: 0.06,
+      oak_log_top: 0.3,
+      oak_log_side: 0.15,
+      oak_leaves: 0.15,
+      oak_planks: 0.35,
+      glass: 0.7,
+      torch: null,
+      lava: null,
+      snow: 0.8,
+    } as Record<string, number | null>,
   },
   sky: {
     /** Time of day at start (hours, 12 = solar noon). */
@@ -249,6 +280,18 @@ export const config = {
     starBrightness: 0.004,
     /** Viewer altitude above the planet surface at sea level (km); +1 m per block above. */
     seaLevelAltitudeKm: 0.2,
+    /** Aerial perspective LUT (Hillaire 2020 §5.5): camera-aligned froxels holding the
+     *  in-scattered light and transmittance between the camera and each depth slice. */
+    aerialPerspective: {
+      enabled: true,
+      /** Froxel grid: screen resolution (x = y) and depth slices. */
+      resolution: 32,
+      slices: 32,
+      /** View depth (km) of the last slice; slices are spaced quadratically (denser near). */
+      maxDepthKm: 4,
+      /** Ray-march samples per slice. */
+      samplesPerSlice: 2,
+    },
     /** Earth-like atmosphere (km⁻¹, km), Hillaire 2020 / Bruneton defaults. */
     atmosphere: {
       bottomRadius: 6360,
@@ -256,19 +299,34 @@ export const config = {
       rayleighScattering: [5.802e-3, 13.558e-3, 33.1e-3] as [number, number, number],
       rayleighScaleHeight: 8,
       mieScattering: 3.996e-3,
-      mieAbsorption: 4.4e-3,
+      /** Hillaire: Mie extinction 4.44e-3 = scattering 3.996e-3 + absorption 0.444e-3. */
+      mieAbsorption: 0.444e-3,
       mieScaleHeight: 1.2,
       mieG: 0.8,
       ozoneAbsorption: [0.65e-3, 1.881e-3, 0.085e-3] as [number, number, number],
       ozoneCenter: 25,
       ozoneWidth: 30,
+      /** Low haze layer (boundary-layer aerosols over humid mountain forest): meteorological
+       *  visibility at the planet surface (km, 0 = none), scale height (km) and
+       *  single-scattering albedo. Clear-air aerosols above alone give ~100 km+. */
+      hazeVisibilityKm: 8,
+      hazeScaleHeight: 0.5,
+      hazeAlbedo: 0.9,
       /** Planet surface beyond the loaded world (forest-like, linear RGB). */
       groundAlbedo: [0.07, 0.09, 0.05] as [number, number, number],
     },
   },
   lighting: {
-    /** Soft-shadow / sky-visibility history length (frames) for temporal accumulation. */
-    temporalFrames: 24,
+    /** Visibility history cap (frames) for a still camera / a fast-moving one. */
+    historyStill: 16,
+    historyMoving: 4,
+    /** Screen motion (pixels per frame) at which a pixel counts as fully moving. */
+    historyMotionPixels: 8,
+    /** Camera translation (blocks/frame) and rotation (°/frame) that count as fully moving. */
+    historyCameraSpeed: 0.5,
+    historyCameraTurn: 1.5,
+    /** Neighbourhood clipping: history is clipped to mean ± k·σ of the current samples. */
+    historyClipK: 1.25,
     /** Reject history when the reprojected depth differs by more than this fraction. */
     temporalDepthTolerance: 0.05,
     /** Trace visibility for one pixel of each 2×2 block per frame (rotating); the temporal
@@ -284,17 +342,48 @@ export const config = {
     emissiveStrength: 6,
     /** Light passing through leaves (subsurface scattering approximation). */
     subsurface: 0.5,
+    /** Fraction of light a leaf voxel lets through for shadow / sky rays. */
+    leafTransmission: 0.3,
+    /** 'physical': sun + atmosphere only. 'debug-fill': adds the non-physical fill lights
+     *  below, only for comparison (not a fix — GI will supply bounce light). */
+    model: 'physical' as 'physical' | 'debug-fill',
+    debugFill: {
+      /** Sky ambient raised (in the sun's colour) until direct : sky is at most this. */
+      maxDirectToSky: 8,
+      /** Minimum sky visibility. */
+      ambientFloor: 0.12,
+      /** Bounce fill: surroundings albedo (linear RGB) and share arriving from all directions. */
+      bounceAlbedo: [0.18, 0.2, 0.14] as [number, number, number],
+      bounceIsotropic: 0.1,
+    },
   },
   exposure: {
     /** Target mid-grey after exposure. */
-    key: 0.18,
+    key: 0.15,
     /** Manual correction in EV (stops). */
     compensation: 0,
-    /** Adaptation speed (1/s): higher reacts faster. */
-    adaptationSpeed: 1.5,
+    /** Adaptation time constants (s): scene getting darker (eyes open up) / brighter. */
+    adaptDarkerSeconds: 2,
+    adaptBrighterSeconds: 0.5,
+    /** Metering: drop this fraction of the weight at each end of the histogram. */
+    trim: 0.05,
+    /** Centre weighting: Gaussian sigma as a fraction of the half screen. */
+    centerSigma: 0.45,
+    /** Sky pixels count this much relative to ground (≈ excluded). */
+    skyWeight: 0.02,
     /** Exposure limits as log2 multipliers of the lighting unit. */
     minEv: -2,
     maxEv: 16,
+  },
+  whiteBalance: {
+    /** 'auto': neutralise the scene light like a camera; 'manual': fixed temperature. */
+    mode: 'auto' as 'auto' | 'manual' | 'off',
+    /** Manual white point (K). 6500 = neutral daylight. */
+    temperature: 6500,
+    /** Fraction of the cast removed (1 = fully neutral). < 1 keeps sunsets warm, nights blue. */
+    strength: 0.4,
+    /** Auto adaptation time constant (s). */
+    adaptSeconds: 4,
   },
   input: {
     /** Radians per pixel of mouse movement. */
@@ -311,6 +400,10 @@ export const config = {
     motionScale: 20,
     /** Depth view: depth (blocks) at which the grey ramp reaches 50 %. */
     depthHalf: 64,
+    /** Scripted camera motion for reproducible motion tests: yaw rate (°/s) and forward
+     *  flight (blocks/s). URL: &spin=90&fly=20. */
+    cameraSpin: 0,
+    cameraFly: 0,
     /** Back-to-back primary passes timed by "Benchmark primary". */
     benchmarkIterations: 50,
     /** Key that toggles the debug overlay. */

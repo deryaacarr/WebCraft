@@ -8,10 +8,21 @@ const TRANSMITTANCE_SIZE: [number, number] = [256, 64];
 const MULTISCATTER_SIZE: [number, number] = [32, 32];
 const SKYVIEW_SIZE: [number, number] = [192, 108];
 // Struct sizes (see atmosphere.wgsl / atmosphere-luts.wgsl / sky.wgsl).
-const ATMOSPHERE_SIZE = 96;
+const ATMOSPHERE_SIZE = 112;
+/** Koschmieder: visibility (km) = 3.912 / extinction (2 % contrast threshold). */
+const KOSCHMIEDER = 3.912;
 const LUT_PARAMS_SIZE = 32;
 const SKY_PARAMS_SIZE = 112;
 const LIGHTING_SIZE = 32;
+/** ExposureState in exposure.wgsl: exposure + pad, wb gains, 3 matrix columns. */
+export const EXPOSURE_STATE_SIZE = 80;
+
+export interface LightingStats {
+  exposureEv: number;
+  rawDirectToSky: number;
+  directToSky: number;
+  wbGains: Vec3;
+}
 /** Sun elevation (degrees) below which the moon becomes the dominant light. */
 const MOON_TAKEOVER_ELEVATION = -4;
 
@@ -50,14 +61,19 @@ export class SkySystem {
     this.atmosphere = uniform('atmosphere', ATMOSPHERE_SIZE);
     this.lutParams = uniform('sky-lut-params', LUT_PARAMS_SIZE);
     this.params = uniform('sky-params', SKY_PARAMS_SIZE);
-    this.lighting = device.createBuffer({ label: 'sky-lighting', size: LIGHTING_SIZE, usage: GPUBufferUsage.STORAGE });
+    this.lighting = device.createBuffer({ label: 'sky-lighting', size: LIGHTING_SIZE, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     this.exposure = device.createBuffer({
       label: 'exposure',
-      size: 16,
+      size: EXPOSURE_STATE_SIZE,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
-    // Start from a daylight exposure; the exposure pass adapts from there.
-    device.queue.writeBuffer(this.exposure, 0, new Float32Array([2, 0, 0, 0]));
+    // ExposureState (exposure.wgsl): a daylight exposure, uninitialised white-balance
+    // gains (w = 0 → the first frame snaps) and an identity white-balance matrix.
+    device.queue.writeBuffer(
+      this.exposure,
+      0,
+      new Float32Array([2, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]),
+    );
     const lut = (label: string, [w, h]: [number, number], layers = 1) =>
       device.createTexture({
         label,
@@ -150,6 +166,8 @@ export class SkySystem {
     f32[19] = s.starBrightness;
     f32[20] = s.moonAlbedo;
     f32[21] = lightIsMoon ? 1 : 0;
+    // Debug fill only: raise the sky ambient to a direct : sky ceiling (0 = atmosphere as is).
+    f32[22] = config.lighting.model === 'debug-fill' ? config.lighting.debugFill.maxDirectToSky : 0;
     this.device.queue.writeBuffer(this.params, 0, this.skyData);
 
     const lut = new Float32Array(this.lutData);
@@ -181,6 +199,32 @@ export class SkySystem {
     pass.setBindGroup(3, this.groups.ambientSky);
     pass.dispatchWorkgroups(1);
     pass.end();
+  }
+
+  private statsPending = false;
+
+  /** Reads back exposure and lighting summaries (debug panel); null while a read is in flight. */
+  async readStats(): Promise<LightingStats | null> {
+    if (this.statsPending) return null;
+    this.statsPending = true;
+    const read = this.device.createBuffer({ size: LIGHTING_SIZE + EXPOSURE_STATE_SIZE, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const encoder = this.device.createCommandEncoder();
+    encoder.copyBufferToBuffer(this.lighting, 0, read, 0, LIGHTING_SIZE);
+    encoder.copyBufferToBuffer(this.exposure, 0, read, LIGHTING_SIZE, EXPOSURE_STATE_SIZE);
+    this.device.queue.submit([encoder.finish()]);
+    try {
+      await read.mapAsync(GPUMapMode.READ);
+      const f = new Float32Array(read.getMappedRange().slice(0));
+      return { rawDirectToSky: f[3]!, directToSky: f[7]!, exposureEv: Math.log2(f[8]!), wbGains: [f[12]!, f[13]!, f[14]!] };
+    } finally {
+      read.destroy();
+      this.statsPending = false;
+    }
+  }
+
+  /** Multiple-scattering LUT (aerial perspective samples it as well). */
+  get multiscatterView(): GPUTextureView {
+    return this.multiscatter.createView();
   }
 
   /** Bind group for @group(3); `bindings` = the sky.wgsl bindings the pipeline uses. */
@@ -225,6 +269,11 @@ export class SkySystem {
     f[19] = a.mieScaleHeight;
     f[20] = a.ozoneCenter;
     f[21] = a.ozoneWidth;
+    // Haze layer from the meteorological visibility at the surface (0 = no haze).
+    const hazeExtinction = a.hazeVisibilityKm > 0 ? KOSCHMIEDER / a.hazeVisibilityKm : 0;
+    f[22] = hazeExtinction * a.hazeAlbedo;
+    f[23] = hazeExtinction;
+    f[24] = a.hazeScaleHeight;
     this.device.queue.writeBuffer(this.atmosphere, 0, f);
     return true;
   }

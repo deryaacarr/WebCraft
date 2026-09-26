@@ -3,7 +3,8 @@ import Stats from 'stats-gl';
 import { config, DEBUG_VIEWS, TEXTURE_RESOLUTIONS, type TextureResolution } from '../config';
 import type { TimeOfDay } from '../core/time-of-day';
 import type { MaterialStats } from '../gpu/materials';
-import type { SkyState } from '../gpu/sky';
+import { MATERIAL_NAMES } from '../world/blocks';
+import type { LightingStats, SkyState } from '../gpu/sky';
 import type { Vec3 } from '../core/math';
 import type { BrickmapMemory } from '../gpu/brickmap';
 import type { VerifyResult } from '../gpu/brickmap-verify';
@@ -50,6 +51,8 @@ export interface DebugOverlayHooks {
   clock: TimeOfDay;
   onBenchmarkLighting(): Promise<{ visibilityMs: number | null; lightingMs: number | null }>;
   skyState(): SkyState;
+  lightingStats(): Promise<LightingStats | null>;
+  probeCenter(): Promise<{ albedo: number; material: number; sky: boolean } | null>;
   /** Reloads the material textures at another resolution. */
   onTextureResolution(resolution: TextureResolution): Promise<void>;
   /** Re-creates the material sampler (anisotropy changed). */
@@ -182,12 +185,15 @@ export class DebugOverlay {
     this.buildCameraControls(hooks);
     this.buildMaterialControls(hooks);
     this.buildSkyControls(hooks);
+    this.buildExposureControls();
 
     const input = this.gui.addFolder('Input');
     input.add(config.input, 'mouseSensitivity', 0.0001, 0.01, 0.0001).name('mouse sensitivity');
 
     const debug = this.gui.addFolder('Debug');
     debug.add(config.debug, 'profilerSmoothing', 1, 240, 1).name('GPU smoothing (frames)');
+    debug.add(config.debug, 'cameraSpin', -360, 360, 1).name('camera spin (°/s)');
+    debug.add(config.debug, 'cameraFly', 0, 100, 1).name('camera fly (blocks/s)');
     debug.close();
   }
 
@@ -229,6 +235,7 @@ export class DebugOverlay {
     this.skyValues.moon = `${Math.round(st.moonPhase * 100)} % lit`;
     this.skyValues.light = this.hooks.skyState().lightIsMoon ? 'moon' : 'sun';
 
+    this.updateExposureStats();
     const m = this.hooks.materialStats();
     if (this.materialValues.source !== 'loading…' || m.resolution === config.textures.resolution) {
       this.materialValues.source = `${m.source} ${m.resolution}px, ${m.layers} layers`;
@@ -250,6 +257,42 @@ export class DebugOverlay {
     this.brickValues.dropped = b.droppedBricks;
   }
 
+  private readonly exposureValues = { exposure: '–', ratio: '–', wb: '–' };
+  private lastStatsRead = 0;
+
+  private buildExposureControls(): void {
+    const e = config.exposure;
+    const wb = config.whiteBalance;
+    const f = this.gui.addFolder('Exposure & colour');
+    f.add(config.render, 'tonemapper', { AgX: 'agx', 'AgX punchy': 'agx-punchy', ACES: 'aces' }).name('tone mapper');
+    f.add(e, 'compensation', -5, 5, 0.1).name('exposure compensation (EV)');
+    f.add(e, 'adaptDarkerSeconds', 0.1, 10, 0.1).name('adapt to dark (s)');
+    f.add(e, 'adaptBrighterSeconds', 0.1, 10, 0.1).name('adapt to bright (s)');
+    f.add(e, 'centerSigma', 0.1, 2, 0.05).name('metering centre weight σ');
+    f.add(wb, 'mode', { 'auto white balance': 'auto', manual: 'manual', off: 'off' }).name('white balance');
+    f.add(wb, 'temperature', 2000, 12000, 100).name('manual temperature (K)');
+    f.add(wb, 'strength', 0, 1, 0.05).name('auto WB strength');
+    f.add(this.exposureValues, 'exposure').name('exposure (EV)').disable().listen();
+    f.add(this.exposureValues, 'ratio').name('sun : sky on open ground').disable().listen();
+    f.add(this.exposureValues, 'wb').name('WB gains (LMS)').disable().listen();
+  }
+
+  private updateExposureStats(): void {
+    const now = performance.now();
+    if (now - this.lastStatsRead < 500) return;
+    this.lastStatsRead = now;
+    void this.hooks.probeCenter().then((p) => {
+      if (!p) return;
+      this.materialValues.probe = p.sky ? 'sky' : `${p.albedo.toFixed(3)} (${MATERIAL_NAMES[p.material] ?? p.material})`;
+    });
+    void this.hooks.lightingStats().then((s) => {
+      if (!s) return;
+      this.exposureValues.exposure = s.exposureEv.toFixed(2);
+      this.exposureValues.ratio = `${s.directToSky.toFixed(1)} : 1 (atmosphere ${s.rawDirectToSky.toFixed(1)} : 1)`;
+      this.exposureValues.wb = s.wbGains.map((g) => g.toFixed(2)).join(' / ');
+    });
+  }
+
   private readonly skyValues = { clock: '', moon: '', light: '', cost: '–' };
 
   private buildSkyControls(hooks: DebugOverlayHooks): void {
@@ -263,18 +306,29 @@ export class DebugOverlay {
     f.add(s, 'sunAngularRadius', 0.1, 3, 0.05).name('sun radius (°, softness)');
     f.add(s, 'nightBoost', 1, 1000, 1).name('night brightness ×');
     f.add(s, 'starBrightness', 0, 0.05, 0.0005).name('stars');
+    const ap = s.aerialPerspective;
+    f.add(ap, 'enabled').name('aerial perspective');
+    f.add(ap, 'maxDepthKm', 0.5, 32, 0.5).name('aerial LUT depth (km)');
+    f.add(ap, 'samplesPerSlice', 1, 8, 1).name('aerial samples / slice');
+    // SkySystem re-uploads the atmosphere (and rebuilds its LUTs) when the config changes.
+    f.add(s.atmosphere, 'hazeVisibilityKm', 0, 200, 1).name('haze visibility (km, 0 = off)');
+    f.add(s.atmosphere, 'hazeScaleHeight', 0.1, 3, 0.05).name('haze layer height (km)');
     f.add(this.skyValues, 'clock').name('clock').disable().listen();
     f.add(this.skyValues, 'moon').name('moon').disable().listen();
     f.add(this.skyValues, 'light').name('shadow light').disable().listen();
-    const e = config.exposure;
-    f.add(e, 'compensation', -5, 5, 0.1).name('exposure comp. (EV)');
-    f.add(e, 'adaptationSpeed', 0.1, 10, 0.1).name('eye adaptation speed');
     const l = config.lighting;
-    f.add(l, 'temporalFrames', 1, 64, 1).name('shadow history (frames)');
+    f.add(l, 'historyStill', 1, 64, 1).name('history cap, still');
+    f.add(l, 'historyMoving', 1, 32, 1).name('history cap, moving');
+    f.add(l, 'historyClipK', 0.25, 4, 0.05).name('history clip k·σ');
     f.add(l, 'visibilityCheckerboard').name('shadow rays ¼ per frame');
     f.add(l, 'skyVisibilityDistance', 2, 128, 1).name('sky vis. distance');
     f.add(l, 'emissiveStrength', 0, 30, 0.5).name('emissive strength');
     f.add(l, 'subsurface', 0, 2, 0.05).name('leaf translucency');
+    f.add(l, 'leafTransmission', 0, 1, 0.05).name('leaf transmission');
+    f.add(l, 'model', { physical: 'physical', 'debug-fill': 'debug-fill' }).name('lighting');
+    f.add(l.debugFill, 'maxDirectToSky', 0, 20, 0.5).name('fill: max sun : sky');
+    f.add(l.debugFill, 'ambientFloor', 0, 0.5, 0.01).name('fill: ambient floor');
+    f.add(l.debugFill, 'bounceIsotropic', 0, 1, 0.05).name('fill: bounce (all dirs)');
     f.add(this.skyValues, 'cost').name('lighting cost').disable().listen();
     const bench = {
       run: () => {
@@ -293,7 +347,7 @@ export class DebugOverlay {
     f.close();
   }
 
-  private readonly materialValues = { source: '', memoryMB: '0', primary: '–' };
+  private readonly materialValues = { source: '', memoryMB: '0', primary: '–', probe: '–' };
 
   private buildMaterialControls(hooks: DebugOverlayHooks): void {
     const v = this.materialValues;
@@ -316,6 +370,7 @@ export class DebugOverlay {
     f.add(t, 'alphaCutoff', 0.05, 0.95, 0.05).name('leaf alpha cutoff');
     f.add(v, 'source').name('textures').disable().listen();
     f.add(v, 'memoryMB').name('texture memory (MB)').disable().listen();
+    f.add(v, 'probe').name('albedo at screen centre').disable().listen();
     f.add(v, 'primary').name('primary pass').disable().listen();
     const bench = {
       run: () => {

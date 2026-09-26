@@ -7,10 +7,20 @@
 #include "color.wgsl"
 
 struct LightingParams {
-  /// 0 lit, 1 shadow (sun visibility), 2 sky visibility (debug views).
+  /// 0 lit, 1 shadow (sun visibility), 2 sky visibility, 3 history length (debug views).
   mode: u32,
   emissive_strength: f32,
   subsurface: f32,
+  /// Debug-fill comparison only (0 in the physical model): minimum sky visibility,
+  /// bounce colour and the share of it arriving from all directions.
+  ambient_floor: f32,
+  bounce_albedo: vec3f,
+  bounce_isotropic: f32,
+  /// History length shown as fully "hot" in the history view.
+  history_max: f32,
+  /// Aerial perspective LUT: depth of its last slice (km) and on/off.
+  aerial_max_depth_km: f32,
+  aerial_enabled: u32,
   _pad: f32,
 };
 
@@ -18,12 +28,28 @@ override WORKGROUP_X: u32 = 8u;
 override WORKGROUP_Y: u32 = 8u;
 const F0_DIELECTRIC: f32 = 0.04;
 const MIN_ROUGHNESS: f32 = 0.03;
+/// World units (blocks) are metres; the atmosphere works in km.
+const KM_PER_UNIT: f32 = 0.001;
 
 @group(0) @binding(0) var<uniform> cam: Camera;
 @group(0) @binding(1) var<uniform> params: LightingParams;
 @group(0) @binding(2) var gbuffer0: texture_2d<u32>;
 @group(0) @binding(3) var visibility: texture_2d<f32>;
 @group(0) @binding(4) var output: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(5) var aerial_tex: texture_3d<f32>;
+@group(0) @binding(6) var gdepth: texture_2d<f32>;
+
+/// Aerial perspective between the camera and a surface at view depth `depth` (world units):
+/// rgb = in-scattered light (pre-exposed), a = transmittance.
+fn aerialPerspective(uv: vec2f, depth: f32) -> vec4f {
+  let slices = f32(textureDimensions(aerial_tex).z);
+  // Texel s holds the path to depth max · ((s + 1) / N)² (see aerial-perspective.wgsl).
+  let s = sqrt(depth * KM_PER_UNIT / params.aerial_max_depth_km) * slices - 1.0;
+  let a = textureSampleLevel(aerial_tex, sky_sampler, vec3f(uv, (max(s, 0.0) + 0.5) / slices), 0.0);
+  // Closer than the first slice: fade towards no atmosphere at the camera.
+  let fade = clamp(s + 1.0, 0.0, 1.0);
+  return vec4f(a.rgb * fade, mix(1.0, a.a, fade));
+}
 
 fn ggxD(n_h: f32, a2: f32) -> f32 {
   let d = n_h * n_h * (a2 - 1.0) + 1.0;
@@ -60,6 +86,14 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let view = rayDir(cam.inv_view_proj, uv);
   let vis = textureLoad(visibility, px, 0).rg;
 
+  if (params.mode == 3u) {
+    // History length: blue = fresh (1 frame), red = full history.
+    let frames = textureLoad(visibility, px, 0).a;
+    let t = clamp((frames - 1.0) / max(params.history_max - 1.0, 1.0), 0.0, 1.0);
+    let heat = mix(mix(vec3f(0.0, 0.1, 0.9), vec3f(0.1, 0.9, 0.2), clamp(t * 2.0, 0.0, 1.0)), vec3f(1.0, 0.1, 0.0), clamp(t * 2.0 - 1.0, 0.0, 1.0));
+    textureStore(output, px, vec4f(select(srgbToLinear(heat), vec3f(0.0), gbIsSky(g.w)), 1.0));
+    return;
+  }
   if (params.mode != 0u) {
     let v = select(vis.y, vis.x, params.mode == 1u);
     textureStore(output, px, vec4f(select(vec3f(v), vec3f(0.0), gbIsSky(g.w)), 1.0));
@@ -101,13 +135,25 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let back = max(-n_l_raw, 0.0);
   color += diffuse_color * surf.w * params.subsurface * back * e_light / PI;
 
-  // Sky ambient: upward irradiance, less for surfaces facing down, times sky visibility.
+  // Sky light from above, occluded by the traced sky visibility. The floor and bounce
+  // terms are zero unless the non-physical debug-fill model is selected.
   let facing = 0.5 + 0.5 * n.y;
-  color += diffuse_color / PI * lighting.sky_irradiance * facing * vis.y * ao;
+  let sky_vis = max(vis.y, params.ambient_floor);
+  let e_sky = lighting.sky_irradiance;
+  let e_bounce = params.bounce_albedo * (lighting.light_illuminance * max(l.y, 0.0) + e_sky);
+  let bounce_weight = mix(1.0 - facing, 1.0, params.bounce_isotropic);
+  color += diffuse_color / PI * (e_sky * facing * sky_vis + e_bounce * bounce_weight * sky_vis) * ao;
+  // Leaves also let some sky light through from the other side.
+  color += diffuse_color * surf.w * params.subsurface * e_sky * sky_vis * 0.5 / PI;
   // Specular sky reflection (unshadowed beyond sky visibility; no GI yet).
   let r = reflect(view, n);
   color += f * skyScattering(r) * vis.y * (1.0 - roughness);
 
   color += albedo * surf.z * params.emissive_strength;
-  textureStore(output, px, vec4f(color * preExposure(), 1.0));
+  var result = color * preExposure();
+  if (params.aerial_enabled != 0u) {
+    let air = aerialPerspective(uv, textureLoad(gdepth, px, 0).x);
+    result = result * air.a + air.rgb;
+  }
+  textureStore(output, px, vec4f(result, 1.0));
 }

@@ -2,6 +2,7 @@ import { config, type DebugView } from '../config';
 import type { CameraFrame, FlyCamera } from '../player/camera';
 import type { GpuBrickmap } from './brickmap';
 import type { MaterialSystem } from './materials';
+import { AerialPerspectivePass } from './passes/aerial-perspective-pass';
 import { ExposurePass } from './passes/exposure-pass';
 import { LightingPass } from './passes/lighting-pass';
 import { VisibilityPass } from './passes/visibility-pass';
@@ -60,24 +61,25 @@ export class Renderer {
     this.primary = primary;
     const camera = () => primary.camera;
     const visibility = new VisibilityPass(device, this.gbuffer, camera, brickmap, materials, sky);
-    const lighting = new LightingPass(device, this.gbuffer, camera, visibility, sky);
+    const aerial = new AerialPerspectivePass(device, camera, sky);
+    const lighting = new LightingPass(device, this.gbuffer, camera, visibility, sky, aerial);
     this.visibility = visibility;
     this.lighting = lighting;
-    const exposure = new ExposurePass(device, () => lighting.output, sky);
+    const exposure = new ExposurePass(device, () => lighting.output, this.gbuffer, sky);
     const view = new GBufferViewPass(device, this.gbuffer);
     const topdown = new TopdownPass(device, brickmap);
     const gradient = new GradientPass(device);
     const out = (p: { output: GPUTexture | null }) => () => p.output;
     this.chains = {
-      lit: { passes: [primary, visibility, lighting, exposure], output: out(lighting), tonemap: true, sky: true },
-      visibility: { passes: [primary, visibility, lighting], output: out(lighting), tonemap: false, sky: true },
+      lit: { passes: [primary, visibility, aerial, lighting, exposure], output: out(lighting), tonemap: true, sky: true },
+      visibility: { passes: [primary, visibility, aerial, lighting], output: out(lighting), tonemap: false, sky: true },
       gbuffer: { passes: [primary, view], output: out(view), tonemap: false, sky: false },
       topdown: { passes: [topdown], output: out(topdown), tonemap: false, sky: false },
       gradient: { passes: [gradient], output: out(gradient), tonemap: false, sky: false },
     };
     // Resize order matters: the G-buffer consumers after the passes they read from.
-    this.allPasses = [primary, visibility, lighting, exposure, view, topdown, gradient];
-    this.blit = new BlitPass(device, gpu.context, gpu.format);
+    this.allPasses = [primary, visibility, aerial, lighting, exposure, view, topdown, gradient];
+    this.blit = new BlitPass(device, gpu.context, gpu.format, sky.exposure);
   }
 
   async init(): Promise<void> {
@@ -99,8 +101,8 @@ export class Renderer {
     if (this.size.apply() || this.resolutionDirty) this.resizeTargets();
     const view = config.debug.view;
     const chain = this.chainFor(view);
-    this.lighting.mode = view === 'shadow' || view === 'skyvis' ? view : 'lit';
-    this.blit.setTonemap(chain.tonemap);
+    this.lighting.mode = view === 'shadow' || view === 'skyvis' || view === 'history' ? view : 'lit';
+    this.blit.setTonemap(chain.tonemap ? config.render.tonemapper : 'none');
     const output = chain.output();
     if (output !== this.boundOutput && output) {
       this.blit.setSource(output);
@@ -280,9 +282,41 @@ export class Renderer {
     return { pixels: width * height, mismatches, ...(first !== undefined && { first }) };
   }
 
+  private probePending = false;
+
+  /** G-buffer albedo (linear luminance) and material at the screen centre (debug panel). */
+  async probeCenter(): Promise<{ albedo: number; material: number; sky: boolean } | null> {
+    const g = this.gbuffer.gbuffer0;
+    if (!g || this.probePending) return null;
+    this.probePending = true;
+    const { device } = this.gpu;
+    const buf = device.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const encoder = device.createCommandEncoder();
+    encoder.copyTextureToBuffer(
+      { texture: g, origin: { x: g.width >> 1, y: g.height >> 1 } },
+      { buffer: buf, bytesPerRow: 256 },
+      { width: 1, height: 1 },
+    );
+    device.queue.submit([encoder.finish()]);
+    try {
+      await buf.mapAsync(GPUMapMode.READ);
+      const [x = 0, , , w = 0] = new Uint32Array(buf.getMappedRange().slice(0));
+      // gbuffer.wgsl: x = pack4x8unorm(linear albedo, AO); w bits 8-15 material, 31 sky.
+      const rgb = [x & 0xff, (x >> 8) & 0xff, (x >> 16) & 0xff].map((c) => c / 255);
+      return {
+        albedo: 0.2126 * rgb[0]! + 0.7152 * rgb[1]! + 0.0722 * rgb[2]!,
+        material: (w >>> 8) & 0xff,
+        sky: (w >>> 31) === 1,
+      };
+    } finally {
+      buf.destroy();
+      this.probePending = false;
+    }
+  }
+
   private chainFor(view: DebugView): SceneChain {
     if (view === 'lit') return this.chains.lit;
-    if (view === 'shadow' || view === 'skyvis') return this.chains.visibility;
+    if (view === 'shadow' || view === 'skyvis' || view === 'history') return this.chains.visibility;
     if (view === 'topdown') return this.chains.topdown;
     if (view === 'gradient') return this.chains.gradient;
     return this.chains.gbuffer;

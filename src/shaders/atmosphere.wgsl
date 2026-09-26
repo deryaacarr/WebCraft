@@ -18,7 +18,14 @@ struct AtmosphereParams {
   mie_scale_height: f32,
   ozone_center: f32,
   ozone_width: f32,
-  _pad: vec2f,
+  /// Low haze layer (boundary-layer aerosols, e.g. humid mountain air): scattering and
+  /// extinction at the surface (km⁻¹), exponential scale height (km). Mie phase.
+  haze_scattering: f32,
+  haze_extinction: f32,
+  haze_scale_height: f32,
+  _pad0: f32,
+  _pad1: f32,
+  _pad2: f32,
 };
 
 struct Medium {
@@ -31,11 +38,12 @@ fn sampleMedium(atm: AtmosphereParams, height: f32) -> Medium {
   let h = max(height, 0.0);
   let rd = exp(-h / atm.rayleigh_scale_height);
   let md = exp(-h / atm.mie_scale_height);
+  let hd = exp(-h / max(atm.haze_scale_height, 1e-3));
   let od = max(0.0, 1.0 - abs(h - atm.ozone_center) / (atm.ozone_width * 0.5));
   var m: Medium;
   m.rayleigh = atm.rayleigh_scattering * rd;
-  m.mie = atm.mie_scattering * md;
-  m.extinction = m.rayleigh + atm.mie_extinction * md + atm.ozone_absorption * od;
+  m.mie = atm.mie_scattering * md + vec3f(atm.haze_scattering * hd);
+  m.extinction = m.rayleigh + atm.mie_extinction * md + vec3f(atm.haze_extinction * hd) + atm.ozone_absorption * od;
   return m;
 }
 
