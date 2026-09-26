@@ -132,7 +132,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 
 // ---------------------------------------------------------------------------------------
 // Spatial filter of the accumulated visibility for display (history stays unfiltered):
-// 5×5 cross-bilateral, depth- and surface-aware. Pixels with little history (just
+// cross-bilateral over a 5×5 footprint sampled sparsely (3×3 taps, 2 px apart: 9 instead
+// of 25 loads), depth- and surface-aware. Pixels with little history (just
 // disoccluded, or a fast camera) are smoothed more, converged ones hardly at all.
 
 @group(0) @binding(10) var accumulated: texture_2d<f32>;
@@ -157,8 +158,8 @@ fn spatial(@builtin(global_invocation_id) gid: vec3u) {
   let sigma = mix(2.5, 0.75, confidence);
   var sum = vec2f(0.0);
   var wsum = 0.0;
-  for (var y = -2; y <= 2; y++) {
-    for (var x = -2; x <= 2; x++) {
+  for (var y = -2; y <= 2; y += 2) {
+    for (var x = -2; x <= 2; x += 2) {
       let q = px + vec2i(x, y);
       if (any(q < vec2i(0)) || any(q >= vec2i(cam.size))) {
         continue;

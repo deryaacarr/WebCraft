@@ -319,7 +319,7 @@ export const config = {
     /** Sky-visibility rays: max distance (blocks). Short = local occlusion only. */
     skyVisibilityDistance: 12,
     /** Step cap for sky-visibility rays (they only need local occlusion). */
-    skyVisibilitySteps: 64,
+    skyVisibilitySteps: 32,
     /** Shadow rays stop here (blocks). */
     shadowDistance: 512,
     /** Light-emitting blocks: black-body colour temperature (K) and mean radiance of a

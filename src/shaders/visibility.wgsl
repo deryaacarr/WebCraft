@@ -1,8 +1,18 @@
 // Per-pixel light visibility, one sample per frame (accumulated by temporal.wgsl):
 //   r = dominant light: a shadow ray towards a random point of the sun / moon disk
 //   g = sky: a cosine-weighted ray over the hemisphere, short range (local occlusion)
-// Rays start on the hit face, offset along its geometric normal. Leaves are alpha
-// tested, so foliage casts dappled shadows.
+// Rays start on the hit face, offset along its geometric normal.
+//
+// Foliage, in one traversal per ray (no restart per leaf voxel):
+//   shadow rays  leaf texels are alpha tested (dappled light through the holes); an opaque
+//                texel does not stop the ray but multiplies its light by
+//                `leaf_transmission` (light passing through leaves) — the same result as
+//                restarting the ray behind each leaf voxel, without the restarts. Once the
+//                light left is negligible the ray stops.
+//   sky rays     stop at the first leaf texel and return `leaf_transmission` (short-range
+//                occlusion only, fewer steps).
+// (A coarser alpha-test LOD from the primary pixel footprint was tried: no faster, and it
+// closed leaf holes — coverage-preserving mips — so the fine LOD is kept.)
 #include "trace.wgsl"
 #include "gbuffer.wgsl"
 #include "camera.wgsl"
@@ -23,8 +33,13 @@ struct VisibilityParams {
   _pad2: u32,
 };
 
-/// Light-carrying segments per ray: each leaf voxel crossed costs one.
-const MAX_LEAF_CROSSINGS: u32 = 4u;
+/// Per-invocation state shared with traceOpaque (it has no extra parameters).
+/// Light left after the leaf texels crossed so far (shadow rays).
+var<private> leaf_light: f32;
+/// 1 while tracing a sky ray: the first leaf texel ends it (see transmittance).
+var<private> sky_ray: u32;
+/// Set by traceOpaque when a sky ray was stopped by a leaf.
+var<private> stopped_by_leaf: bool;
 
 /// Pixel of each 2×2 block traced in a frame (rotating so all four get samples).
 fn tracedOffset(frame: u32) -> vec2u {
@@ -33,6 +48,9 @@ fn tracedOffset(frame: u32) -> vec2u {
 
 override WORKGROUP_X: u32 = 8u;
 override WORKGROUP_Y: u32 = 8u;
+/// Shadow rays stop once the light left behind leaves drops below this (≈ 4 opaque leaf
+/// texels at leaf_transmission 0.3).
+const MIN_LEAF_LIGHT: f32 = 0.01;
 /// Offset of ray origins from the surface (blocks): leaves the hit voxel cleanly.
 const SURFACE_OFFSET: f32 = 1e-3;
 
@@ -43,7 +61,26 @@ const SURFACE_OFFSET: f32 = 1e-3;
 @group(0) @binding(4) var<uniform> params: VisibilityParams;
 
 fn traceOpaque(id: u32, cell: vec3i, normal: vec3i, local: vec3f, t: f32, dir: vec3f) -> bool {
-  return alphaOpaque(id, cell, normal, local, dir, t);
+  if (all(normal == vec3i(0))) {
+    return true;
+  }
+  let face = faceIndex(normal);
+  let material = faceMaterial(id, face);
+  if ((materials[material].flags & MATERIAL_ALPHA_TEST) == 0u) {
+    return true;
+  }
+  let m = faceMapping(material, cell, face, local);
+  let lod = coneLod(dir, m.n, t * material_params.pixel_spread);
+  if (textureSampleLevel(tex_albedo, tex_sampler, m.uv, m.layer, lod).a < material_params.alpha_cutoff) {
+    return false; // a hole: light passes
+  }
+  if (sky_ray != 0u) {
+    stopped_by_leaf = true;
+    return true;
+  }
+  // An opaque leaf texel attenuates the light and the ray goes on, unless little is left.
+  leaf_light *= params.leaf_transmission;
+  return leaf_light < MIN_LEAF_LIGHT;
 }
 
 fn hash(v: vec3u) -> u32 {
@@ -69,38 +106,18 @@ fn basis(n: vec3f) -> mat3x3f {
   return mat3x3f(vec3f(1.0 + s * n.x * n.x * a, s * b, -s * n.x), vec3f(b, s + n.y * n.y * a, -n.y), n);
 }
 
-/// Fraction of light reaching `start` (camera-relative) along `dir` within `distance`:
-/// 0 behind solid blocks; leaf voxels pass `leaf_transmission` and the ray continues.
+/// Light reaching `start` along `dir` within `distance`, in one traversal: shadow rays
+/// return the product of the leaf transmissions crossed (0 behind solid blocks); sky rays
+/// stopped by a leaf return `leaf_transmission`.
 fn transmittance(start: vec3f, dir: vec3f, distance: f32, max_steps: u32) -> f32 {
-  var p = start;
-  var left = distance;
-  var t = 1.0;
-  for (var i = 0u; i <= MAX_LEAF_CROSSINGS; i++) {
-    let cell = vec3i(floor(p));
-    let r = traceRay(cam.origin_cell + cell, p - vec3f(cell), dir, 0.0, left, max_steps);
-    if (!r.hit) {
-      return t;
-    }
-    let face = faceIndex(select(r.normal, vec3i(0, 1, 0), all(r.normal == vec3i(0))));
-    let material = faceMaterial(r.id, face);
-    if ((materials[material].flags & MATERIAL_ALPHA_TEST) == 0u || i == MAX_LEAF_CROSSINGS) {
-      return 0.0;
-    }
-    t *= params.leaf_transmission;
-    // Continue from where the ray leaves this leaf voxel.
-    let rel = vec3f(r.cell - cam.origin_cell);
-    let step_pos = select(vec3f(0.0), vec3f(1.0), dir >= vec3f(0.0));
-    // A zero component has step_pos = 1, so its exit distance is a huge positive number.
-    let safe = select(dir, vec3f(1e-30), abs(dir) < vec3f(1e-30));
-    let exits = (rel + step_pos - p) / safe;
-    let t_exit = min(min(exits.x, exits.y), exits.z);
-    p += dir * (t_exit + SURFACE_OFFSET);
-    left -= t_exit;
-    if (left <= 0.0) {
-      return t;
-    }
+  stopped_by_leaf = false;
+  leaf_light = 1.0;
+  let cell = vec3i(floor(start));
+  let r = traceRay(cam.origin_cell + cell, start - vec3f(cell), dir, 0.0, distance, max_steps);
+  if (!r.hit) {
+    return leaf_light;
   }
-  return t;
+  return select(0.0, params.leaf_transmission, stopped_by_leaf);
 }
 
 @compute @workgroup_size(WORKGROUP_X, WORKGROUP_Y, 1)
@@ -132,6 +149,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let sin_t = sqrt(max(1.0 - cos_t * cos_t, 0.0));
     let phi = 2.0 * PI * r.y;
     let l = basis(sky.light_dir) * vec3f(sin_t * cos(phi), sin_t * sin(phi), cos_t);
+    sky_ray = 0u;
     sun = transmittance(start, l, params.shadow_distance, params.max_steps);
   }
 
@@ -142,6 +160,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let sin_t = sqrt(q.x);
     let phi = 2.0 * PI * q.y;
     let d = basis(n) * vec3f(sin_t * cos(phi), sin_t * sin(phi), sqrt(1.0 - q.x));
+    sky_ray = 1u;
     skyv = transmittance(start, d, params.sky_distance, params.sky_max_steps);
   }
 
