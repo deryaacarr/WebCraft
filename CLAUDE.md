@@ -20,25 +20,28 @@ Tarayıcıda çalışan, fotogerçekçi görüntüye sahip, tek oyunculu bir vox
 - Mimari kararlar değişirse bu dosyanın "Mimari" bölümünü güncelle.
 
 ## Güncel durum
-- Tamamlanan aşamalar: 0–8 (GI, ReSTIR DI, denoiser dahil) ve performans turları. Son commit'ler: `0aac389` (8.5 madde 1–2).
-- **Şu an: Aşama 8.5 — Doğal malzeme detayı.** Madde 1 (dünya uzayında doku, 2 m) ve 2 (hex tiling, yükseklik karışımlı varyant sınırları, makro ton, eğim/toz, yosun, çim/yaprak tonu) bitti ve onaylandı. **Sıradaki: madde 3 — aşınmış kenarlar.**
+- Tamamlanan aşamalar: 0–8 (GI, ReSTIR DI, denoiser dahil) ve performans turları. Son commit'ler: `0aac389` (8.5 madde 1–2 + enerji tasarrufu), `8c66fc6` (varyant okunabilirliği, damar gibi sınırlar, ±%20 varyant parlaklığı).
+- **Şu an: Aşama 8.5 — Doğal malzeme detayı.** Madde 1 (dünya uzayında doku, 2 m) ve 2 (hex tiling, yükseklik karışımlı damar sınırları, makro ton, eğim/toz, yosun lekeleri, çim/yaprak tonu, okunabilirlik düzeltmesi) bitti ve onaylandı. **Sıradaki: madde 3 — aşınmış kenarlar.**
 - Kalan maddeler:
   3. Aşınmış kenarlar: ışın blok kenarına yakın çarpınca normali yuvarla (bevel); kaya/taşta gürültüyle kırık, çentikli, düzensiz kenarlar; yalnızca açıkta kalan kenarlarda (komşusu dolu kenarda değil).
   4. Kırık taşlar ve kaya detayı: 8×8×8 alt-voxel (micro-voxel) desteği (ışın bloğa girince iç ızgarada DDA); yeni bloklar pebbles, boulder, mossy_stone, cracked_stone; arazi üreticisi bunları yamaçlara, dere kenarlarına, kaya diplerine dağıtsın.
   5. Gerçekçi ağaçlar: yaprak bloklarında alt-voxel ince dallar; daha seyrek, katmanlı yaprak dokusu; boy/taç/gövde çeşitliliği, yan dallar; meşe, çam, huş (dağ ormanı çam ağırlıklı); mevcut yaprak transmission korunur.
   6. Zemin örtüsü: çim üstünde yoğun çim, eğrelti otu, küçük çalılar (alfa testli çapraz düzlemler); ağaç diplerinde düşmüş yaprak ve dal.
+- Bütçe: aşama 8.5 toplamı ≤ 3 ms ek kare süresi. Şu ana kadar ~1.15 ms kullanıldı (madde 1+2, primary pass, kaya duvarı pozu; ağaç pozunda ~1.4 ms). Kalan ~1.85 ms madde 3–6 için; gerekirse mesafe LOD'u (uzakta alt-voxel ve zemin örtüsü kapalı).
 - Aşama kuralları:
   - Her ana madde bitince dur, sonucu raporla, onay bekle; onaysız sonraki maddeye geçme.
-  - Görsel referans (aşağıda) korunur: genel renk, ışık, hava değişmez; sahte ışık yok.
-  - Performans her adımda ölçülür (`tools/browser.mjs bench`, dönüşümlü varyantlar, birkaç tekrarın minimumu). Alt-voxel + zemin örtüsü toplam kare süresine ≤ 3 ms eklemeli; gerekirse mesafe LOD'u (uzakta alt-voxel ve zemin örtüsü kapalı).
+  - Görsel referans ve okunabilirlik kuralı (aşağıda) korunur: genel renk, ışık, hava değişmez; sahte ışık yok; farklı blok türleri karışmaz.
+  - Performans her adımda ölçülür (`tools/browser.mjs bench`, dönüşümlü varyantlar, birkaç tekrarın minimumu).
   - Panelde "Detail" klasörü: her özellik ayrı aç/kapa, yoğunluk ve ölçek.
   - Her adımda aynı pozlardan önce/sonra görüntüleri `docs/detail-*.png`.
 - Açık notlar:
-  - Ölçümler yalnızca şarjda ve düşük güç modu kapalıyken güvenilir; pilde/ısınınca ±%30 oynuyor (`pmset -g`, `pmset -g batt` ile kontrol et).
+  - Enerji tasarrufu var (`config.power`): varsayılan 30 FPS, 3 s hareketsizlikte 10 FPS, sekme gizliyken döngü durur. Ölçüm araçları benchmark'ı doğrudan çalıştırdığı için etkilenmez.
+  - Ölçümler yalnızca şarjda ve düşük güç modu kapalıyken güvenilir; pilde/ısınınca ±%30 oynuyor (`pmset -g`, `pmset -g batt`). Son ölçümler pildeydi.
   - Sabah referans pozunda parlak alanlar 4b24741'e göre ~−%10 (ton eşitlemesinin kaldırılmasından; GI payı ~−%3).
   - Varyant parlaklık sınırı ±%20: çakıl 0.68/0.13 → 0.36/0.24, toprak ve çim hafifçe yaklaştırıldı (`docs/detail-borders-fix.png`).
   - Dünya uzayı doku 2 m'de tekrar eder (kaynak dokuların fiziksel boyutu); hex tiling tekrarı kırar.
   - GI 1/3 çözünürlükte (`resolutionDivisor` 3); yoğun sahnede GI + denoise ~4.6 ms.
+  - Blok kırma / düşen eşya / parçacık sistemi henüz yok (kuralı aşağıda).
   - WGSL ayrılmış kelimeler: `set`, `patch`, `target`, `smooth` tanımlayıcı olarak kullanılamaz.
   - 'auto' layout kullanılmayan binding'leri düşürür: shader'a yeni binding eklenince her pass'in `bindGroup(layout, bindings)` listesini güncelle (ör. visibility materyal grubu [0,1,2,3,6,10]).
 
