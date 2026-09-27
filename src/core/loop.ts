@@ -1,4 +1,5 @@
 import { config } from '../config';
+import { onPowerSavingResume, powerSavingSuspended } from './power';
 
 export interface LoopCallbacks {
   /** Advances the simulation by exactly `dt` seconds. */
@@ -47,24 +48,36 @@ export class FramePacer {
   private next = -Infinity;
   private lastActive = -Infinity;
 
-  constructor(private readonly getConfig: () => { maxFps: number; idleFps: number; idleAfterSeconds: number } = () => config.power) {}
+  constructor(
+    private readonly getConfig: () => { enabled: boolean; maxFps: number; idleFps: number; idleAfterSeconds: number } = () => config.power,
+    private readonly suspended: () => boolean = powerSavingSuspended,
+  ) {}
 
-  /** Something changed (input, camera motion, streaming): full rate for a while. */
+  /** Something changed (input, camera motion, world): full rate, starting with the next
+   *  display refresh (no waiting out an idle interval). */
   markActive(now: number): void {
+    if (this.isIdle(now)) this.next = -Infinity;
     this.lastActive = now;
   }
 
-  /** Target frame rate at `now` (0 = uncapped). */
+  private isIdle(now: number): boolean {
+    return now - this.lastActive > this.getConfig().idleAfterSeconds * 1000;
+  }
+
+  /** Target frame rate at `now`: 0 = uncapped, −1 = stopped (idle with idleFps 0). */
   targetFps(now: number): number {
     const c = this.getConfig();
-    const idle = c.idleFps > 0 && now - this.lastActive > c.idleAfterSeconds * 1000;
-    return idle ? (c.maxFps > 0 ? Math.min(c.idleFps, c.maxFps) : c.idleFps) : c.maxFps;
+    if (!c.enabled || this.suspended()) return 0;
+    if (!this.isIdle(now)) return c.maxFps;
+    if (c.idleFps <= 0) return -1;
+    return c.maxFps > 0 ? Math.min(c.idleFps, c.maxFps) : c.idleFps;
   }
 
   /** Whether to run a frame for the display refresh at `now`. */
   shouldRun(now: number): boolean {
     const fps = this.targetFps(now);
-    if (fps <= 0) return true;
+    if (fps < 0) return false;
+    if (fps === 0) return true;
     const interval = 1000 / fps;
     // Half a display frame of slack, so a 60 Hz display runs a 30 fps cap every 2nd frame.
     if (now < this.next - 4) return false;
@@ -86,19 +99,33 @@ export class GameLoop {
   private lastTime = -1;
 
   constructor(private readonly callbacks: LoopCallbacks) {
-    document.addEventListener('visibilitychange', () => {
-      if (!config.power.pauseHidden) return;
-      // Hidden: stop entirely. Visible again: restart without a huge first frame delta.
-      if (document.hidden) this.pause();
-      else if (this.running) this.resume();
-    });
+    // Hidden tab or unfocused window: stop entirely; back: restart without a huge first
+    // frame delta. Re-evaluated on every change and when a benchmark ends.
+    const update = () => this.updatePaused();
+    document.addEventListener('visibilitychange', update);
+    window.addEventListener('blur', update);
+    window.addEventListener('focus', update);
+    onPowerSavingResume(update);
+  }
+
+  /** Whether energy saving wants the loop stopped right now. */
+  private shouldPause(): boolean {
+    const p = config.power;
+    if (!p.enabled || powerSavingSuspended()) return false;
+    return (p.pauseHidden && document.hidden) || (p.pauseUnfocused && !document.hasFocus());
+  }
+
+  private updatePaused(): void {
+    if (!this.running) return;
+    if (this.shouldPause()) this.pause();
+    else this.resume();
   }
 
   private running = false;
 
   start(): void {
     this.running = true;
-    this.resume();
+    this.updatePaused();
   }
 
   stop(): void {

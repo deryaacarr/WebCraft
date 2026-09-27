@@ -59,8 +59,9 @@ describe('FixedStepClock', () => {
 });
 
 describe('FramePacer', () => {
-  const cfg = { maxFps: 30, idleFps: 10, idleAfterSeconds: 3 };
-  /** Display refreshes at `hz` from `from` ms for `frames` frames; how many ran. */
+  const cfg = { enabled: true, maxFps: 30, idleFps: 10, idleAfterSeconds: 3 };
+  const never = () => false;
+  /** Display refreshes at `hz` from `from` ms for the span to `to`; how many ran. */
   const runs = (pacer: FramePacer, from: number, to: number, hz = 60) => {
     let n = 0;
     const frames = Math.round(((to - from) * hz) / 1000);
@@ -69,13 +70,13 @@ describe('FramePacer', () => {
   };
 
   it('caps a 60 Hz display at 30 fps while active', () => {
-    const pacer = new FramePacer(() => cfg);
+    const pacer = new FramePacer(() => cfg, never);
     pacer.markActive(0);
     expect(runs(pacer, 0, 1000)).toBe(30);
   });
 
   it('drops to the idle rate after the idle delay', () => {
-    const pacer = new FramePacer(() => cfg);
+    const pacer = new FramePacer(() => cfg, never);
     pacer.markActive(0);
     runs(pacer, 0, 3000);
     expect(pacer.targetFps(3500)).toBe(10);
@@ -84,8 +85,29 @@ describe('FramePacer', () => {
     expect(pacer.targetFps(5000)).toBe(30);
   });
 
-  it('runs every display frame when uncapped', () => {
-    const pacer = new FramePacer(() => ({ maxFps: 0, idleFps: 0, idleAfterSeconds: 3 }));
-    expect(runs(pacer, 0, 1000, 120)).toBe(120);
+  it('stops when idle with idleFps 0 and resumes at once on activity', () => {
+    const pacer = new FramePacer(() => ({ ...cfg, idleFps: 0 }), never);
+    pacer.markActive(0);
+    runs(pacer, 0, 3000);
+    expect(runs(pacer, 4000, 6000)).toBe(0);
+    pacer.markActive(6010);
+    expect(pacer.shouldRun(6016)).toBe(true);
+  });
+
+  it('wakes from idle on the very next refresh', () => {
+    const pacer = new FramePacer(() => cfg, never);
+    pacer.markActive(0);
+    runs(pacer, 0, 4000); // idle at 10 fps by now
+    pacer.shouldRun(4000);
+    pacer.markActive(4010);
+    expect(pacer.shouldRun(4016)).toBe(true);
+  });
+
+  it('runs every display frame when uncapped, disabled or suspended', () => {
+    const uncapped = new FramePacer(() => ({ ...cfg, maxFps: 0 }), never);
+    uncapped.markActive(0);
+    expect(runs(uncapped, 0, 1000, 120)).toBe(120);
+    expect(runs(new FramePacer(() => ({ ...cfg, enabled: false }), never), 0, 1000, 120)).toBe(120);
+    expect(runs(new FramePacer(() => cfg, () => true), 10000, 11000, 120)).toBe(120);
   });
 });

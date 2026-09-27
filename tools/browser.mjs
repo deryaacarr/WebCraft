@@ -80,7 +80,8 @@ await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 800, dev
 
 /** Loads a pose and waits until the app is up and the world around it has streamed in. */
 async function load(query) {
-  await send('Page.navigate', { url: `http://localhost:${PORT}/?${query}` });
+  // &power=0: no frame capping / pausing (a headless window never has focus).
+  await send('Page.navigate', { url: `http://localhost:${PORT}/?${query}&power=0` });
   for (let i = 0; i < 240 && !(await evaluate('!!window.webcraft')); i++) await sleep(250);
   for (let i = 0; i < 240; i++) {
     const ready = await evaluate('window.webcraft.world.chunkCount > 0 && window.webcraft.streamer.stats.missing === 0');

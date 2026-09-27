@@ -154,10 +154,12 @@ export class DebugOverlay {
     this.gui.add(config.debug, 'view', [...DEBUG_VIEWS]).name('view');
 
     const sim = this.gui.addFolder('Simulation');
-    sim.add(config.power, 'maxFps', 0, 240, 1).name('frame rate cap (0 = display)');
-    sim.add(config.power, 'idleFps', 0, 60, 1).name('idle frame rate (0 = off)');
-    sim.add(config.power, 'idleAfterSeconds', 0.5, 30, 0.5).name('idle after (s)');
+    sim.add(config.power, 'enabled').name('energy saving');
+    sim.add(config.power, 'maxFps', { '30': 30, '60': 60, unlimited: 0 }).name('FPS limit');
+    sim.add(config.power, 'idleFps', 0, 30, 1).name('idle FPS (0 = stop)');
+    sim.add(config.power, 'idleAfterSeconds', 0.5, 10, 0.5).name('idle after (s)');
     sim.add(config.power, 'pauseHidden').name('pause when tab hidden');
+    sim.add(config.power, 'pauseUnfocused').name('pause when window unfocused');
     sim.add(config.sim, 'tickRate', 10, 240, 1).name('tick rate (Hz)');
     sim.add(config.sim, 'maxFrameTime', 0.05, 1, 0.01).name('max frame (s)');
 

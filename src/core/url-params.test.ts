@@ -18,6 +18,7 @@ describe('parseUrlOverrides', () => {
   it('parses test torches and the GI switch', () => {
     expect(parseUrlOverrides('?torches=8&gi=0')).toEqual({ torches: 8, gi: false });
     expect(parseUrlOverrides('?gi=1').gi).toBe(true);
+    expect(parseUrlOverrides('?power=0').power).toBe(false);
     expect(parseUrlOverrides('?torches=-3').torches).toBeUndefined();
   });
 

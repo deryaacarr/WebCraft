@@ -12,6 +12,7 @@ import { DEBUG_VIEWS, type DebugView } from '../config';
  *   &spin=90&fly=20              scripted camera turn (°/s) and forward flight (blocks/s)
  *   &torches=12                  place test torches around the camera once loaded
  *   &gi=0                        global illumination off
+ *   &power=0                     energy saving off (automation, benchmarks)
  */
 export interface UrlOverrides {
   camera?: { position: [number, number, number]; yawDeg: number; pitchDeg: number };
@@ -25,6 +26,7 @@ export interface UrlOverrides {
   cameraFly?: number;
   torches?: number;
   gi?: boolean;
+  power?: boolean;
 }
 
 export function parseUrlOverrides(search: string): UrlOverrides {
@@ -56,6 +58,7 @@ export function parseUrlOverrides(search: string): UrlOverrides {
   const torches = positiveInt('torches');
   if (torches) out.torches = torches;
   if (params.has('gi')) out.gi = params.get('gi') !== '0';
+  if (params.has('power')) out.power = params.get('power') !== '0';
   const dmax = positiveInt('dmax');
   if (dmax) out.distanceMax = Math.min(dmax, 254);
 

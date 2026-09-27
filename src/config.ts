@@ -36,15 +36,20 @@ export const config = {
     /** Longest frame delta (s) fed into the accumulator; prevents spiral of death after stalls. */
     maxFrameTime: 0.25,
   },
-  /** Energy saving: frame rate cap, lower rate when idle, nothing while the tab is hidden. */
+  /** Energy saving (keeps the machine cool during development). Benchmarks suspend it
+   *  (core/power.ts); URL `&power=0` turns it off (automation). */
   power: {
-    /** Frame rate cap (0 = the display rate). */
+    enabled: true,
+    /** Frame rate cap: 30, 60 or 0 = the display rate. */
     maxFps: 30,
-    /** Frame rate once nothing has moved for `idleAfterSeconds` (0 = no idle mode). */
+    /** Once camera, input and world have been still for `idleAfterSeconds` (temporal
+     *  accumulation has settled by then), run at this rate; 0 = stop rendering until
+     *  something moves. Motion or input resumes full rate at once. */
     idleFps: 10,
-    idleAfterSeconds: 3,
-    /** Stop the loop while the tab is hidden. */
+    idleAfterSeconds: 1.5,
+    /** Stop the loop while the tab is hidden / the window is not focused. */
     pauseHidden: true,
+    pauseUnfocused: true,
   },
   render: {
     /** Internal (traced) resolution relative to the canvas backing size, upscaled in the

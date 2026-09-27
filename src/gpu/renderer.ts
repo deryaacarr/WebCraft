@@ -1,4 +1,5 @@
 import { config, type DebugView } from '../config';
+import { withoutPowerSaving } from '../core/power';
 import type { CameraFrame, FlyCamera } from '../player/camera';
 import type { GpuBrickmap } from './brickmap';
 import type { MaterialSystem } from './materials';
@@ -145,17 +146,23 @@ export class Renderer {
    * does not pick up waits on neighbouring passes.
    */
   async benchmarkPrimary(iterations: number): Promise<{ gpuMs: number | null; wallMs: number; avgSteps: number; p95Steps: number }> {
-    const timing = await this.benchmarkPasses([this.primary], iterations);
-    return { ...timing, ...(await this.stepStats()) };
+    // Energy saving off while measuring (core/power.ts).
+    return withoutPowerSaving(async () => {
+      const timing = await this.benchmarkPasses([this.primary], iterations);
+      return { ...timing, ...(await this.stepStats()) };
+    });
   }
 
   /** Times the lighting passes after primary (visibility rays + accumulation, shading). */
   async benchmarkLighting(iterations: number): Promise<{ visibilityMs: number | null; lightingMs: number | null }> {
-    const [vis, light] = [this.visibility, this.lighting];
-    return {
-      visibilityMs: (await this.benchmarkPasses([vis], iterations)).gpuMs,
-      lightingMs: (await this.benchmarkPasses([light], iterations)).gpuMs,
-    };
+    // Energy saving off while measuring (core/power.ts).
+    return withoutPowerSaving(async () => {
+      const [vis, light] = [this.visibility, this.lighting];
+      return {
+        visibilityMs: (await this.benchmarkPasses([vis], iterations)).gpuMs,
+        lightingMs: (await this.benchmarkPasses([light], iterations)).gpuMs,
+      };
+    });
   }
 
   /**
@@ -164,24 +171,27 @@ export class Renderer {
    * (aerial perspective, shading, exposure). Sky LUTs and the blit are not included.
    */
   async benchmarkFrame(iterations: number): Promise<Record<'primary' | 'visibility' | 'giTrace' | 'giDenoise' | 'other', number | null>> {
-    const time = async (passes: RenderPass[]) => (await this.benchmarkPasses(passes, iterations)).gpuMs;
-    const primary = await time([this.primary]);
-    const visibility = await time([this.visibility]);
-    let giTrace: number | null = null;
-    let giDenoise: number | null = null;
-    if (config.gi.enabled) {
-      try {
-        this.gi.stage = 'trace';
-        giTrace = await time([this.gi]);
-        this.gi.stage = 'denoise';
-        giDenoise = await time([this.gi]);
-      } finally {
-        this.gi.stage = 'all';
+    // Energy saving off while measuring (core/power.ts).
+    return withoutPowerSaving(async () => {
+      const time = async (passes: RenderPass[]) => (await this.benchmarkPasses(passes, iterations)).gpuMs;
+      const primary = await time([this.primary]);
+      const visibility = await time([this.visibility]);
+      let giTrace: number | null = null;
+      let giDenoise: number | null = null;
+      if (config.gi.enabled) {
+        try {
+          this.gi.stage = 'trace';
+          giTrace = await time([this.gi]);
+          this.gi.stage = 'denoise';
+          giDenoise = await time([this.gi]);
+        } finally {
+          this.gi.stage = 'all';
+        }
       }
-    }
-    // Only passes that record work (the timestamps pair the first and last pass).
-    const other = await time([...(config.sky.aerialPerspective.enabled ? [this.aerial] : []), this.lighting, this.exposure]);
-    return { primary, visibility, giTrace, giDenoise, other };
+      // Only passes that record work (the timestamps pair the first and last pass).
+      const other = await time([...(config.sky.aerialPerspective.enabled ? [this.aerial] : []), this.lighting, this.exposure]);
+      return { primary, visibility, giTrace, giDenoise, other };
+    });
   }
 
   /**
@@ -272,51 +282,54 @@ export class Renderer {
    * last frame) and compares every pixel. Everything except the DDA step count must match.
    */
   async verifyPrepass(): Promise<{ pixels: number; mismatches: number; first?: string }> {
-    const camera = this.lastCamera;
-    const g = this.gbuffer;
-    if (!camera || !g.gbuffer0 || !g.depth) throw new Error('no frame rendered yet');
-    const { device } = this.gpu;
-    const { width, height } = g;
-    const rowG = Math.ceil((width * 16) / 256) * 256;
-    const rowD = Math.ceil((width * 4) / 256) * 256;
-    const readback = () => ({
-      g: device.createBuffer({ size: rowG * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }),
-      d: device.createBuffer({ size: rowD * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }),
-    });
-    const runs = [readback(), readback()];
-    const noTimestamps = { timestampWrites: () => undefined };
-    [false, true].forEach((prepass, i) => {
-      const encoder = device.createCommandEncoder({ label: `verify-prepass-${prepass}` });
-      this.primary.encode({ encoder, profiler: noTimestamps, time: 0, dt: 0, camera }, prepass);
-      encoder.copyTextureToBuffer({ texture: g.gbuffer0! }, { buffer: runs[i]!.g, bytesPerRow: rowG }, { width, height });
-      encoder.copyTextureToBuffer({ texture: g.depth! }, { buffer: runs[i]!.d, bytesPerRow: rowD }, { width, height });
-      device.queue.submit([encoder.finish()]);
-    });
-    await Promise.all(runs.flatMap((r) => [r.g.mapAsync(GPUMapMode.READ), r.d.mapAsync(GPUMapMode.READ)]));
-    const [a, b] = runs.map((r) => ({ g: new Uint32Array(r.g.getMappedRange()), d: new Float32Array(r.d.getMappedRange()) }));
-    let mismatches = 0;
-    let first: string | undefined;
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const gi = (y * rowG) / 4 + x * 4;
-        const di = (y * rowD) / 4 + x;
-        const same =
-          a!.g[gi] === b!.g[gi] &&
-          a!.g[gi + 1] === b!.g[gi + 1] &&
-          a!.g[gi + 2] === b!.g[gi + 2] &&
-          (a!.g[gi + 3]! & ~GB_STEPS_BITS) === (b!.g[gi + 3]! & ~GB_STEPS_BITS) &&
-          a!.d[di] === b!.d[di];
-        if (!same) {
-          mismatches++;
-          first ??= `(${x}, ${y}) depth ${a!.d[di]} vs ${b!.d[di]}, block ${a!.g[gi + 3]! & 0xff} vs ${b!.g[gi + 3]! & 0xff}`;
+    // Energy saving off while measuring (core/power.ts).
+    return withoutPowerSaving(async () => {
+      const camera = this.lastCamera;
+      const g = this.gbuffer;
+      if (!camera || !g.gbuffer0 || !g.depth) throw new Error('no frame rendered yet');
+      const { device } = this.gpu;
+      const { width, height } = g;
+      const rowG = Math.ceil((width * 16) / 256) * 256;
+      const rowD = Math.ceil((width * 4) / 256) * 256;
+      const readback = () => ({
+        g: device.createBuffer({ size: rowG * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }),
+        d: device.createBuffer({ size: rowD * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ }),
+      });
+      const runs = [readback(), readback()];
+      const noTimestamps = { timestampWrites: () => undefined };
+      [false, true].forEach((prepass, i) => {
+        const encoder = device.createCommandEncoder({ label: `verify-prepass-${prepass}` });
+        this.primary.encode({ encoder, profiler: noTimestamps, time: 0, dt: 0, camera }, prepass);
+        encoder.copyTextureToBuffer({ texture: g.gbuffer0! }, { buffer: runs[i]!.g, bytesPerRow: rowG }, { width, height });
+        encoder.copyTextureToBuffer({ texture: g.depth! }, { buffer: runs[i]!.d, bytesPerRow: rowD }, { width, height });
+        device.queue.submit([encoder.finish()]);
+      });
+      await Promise.all(runs.flatMap((r) => [r.g.mapAsync(GPUMapMode.READ), r.d.mapAsync(GPUMapMode.READ)]));
+      const [a, b] = runs.map((r) => ({ g: new Uint32Array(r.g.getMappedRange()), d: new Float32Array(r.d.getMappedRange()) }));
+      let mismatches = 0;
+      let first: string | undefined;
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const gi = (y * rowG) / 4 + x * 4;
+          const di = (y * rowD) / 4 + x;
+          const same =
+            a!.g[gi] === b!.g[gi] &&
+            a!.g[gi + 1] === b!.g[gi + 1] &&
+            a!.g[gi + 2] === b!.g[gi + 2] &&
+            (a!.g[gi + 3]! & ~GB_STEPS_BITS) === (b!.g[gi + 3]! & ~GB_STEPS_BITS) &&
+            a!.d[di] === b!.d[di];
+          if (!same) {
+            mismatches++;
+            first ??= `(${x}, ${y}) depth ${a!.d[di]} vs ${b!.d[di]}, block ${a!.g[gi + 3]! & 0xff} vs ${b!.g[gi + 3]! & 0xff}`;
+          }
         }
       }
-    }
-    for (const r of runs) {
-      r.g.destroy();
-      r.d.destroy();
-    }
-    return { pixels: width * height, mismatches, ...(first !== undefined && { first }) };
+      for (const r of runs) {
+        r.g.destroy();
+        r.d.destroy();
+      }
+      return { pixels: width * height, mismatches, ...(first !== undefined && { first }) };
+    });
   }
 
   private probePending = false;

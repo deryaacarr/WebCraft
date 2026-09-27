@@ -36,6 +36,7 @@ async function main(): Promise<void> {
   }
   if (overrides.workgroup) config.trace.workgroup = overrides.workgroup;
   if (overrides.gi !== undefined) config.gi.enabled = overrides.gi;
+  if (overrides.power !== undefined) config.power.enabled = overrides.power;
   if (overrides.prepassTile) config.trace.prepassTile = overrides.prepassTile;
   if (overrides.distanceMax) config.trace.distanceMax = overrides.distanceMax;
 
@@ -166,6 +167,8 @@ async function main(): Promise<void> {
         pendingTorches -= placeTorches(pendingTorches, config.debug.testTorchRadius);
       }
       const changes = world.takeChanges();
+      // World edits and streamed chunks count as motion (energy saving wakes up).
+      if (changes.changed.length || changes.removed.length) loop.markActive();
       emitters.apply(changes);
       brickmap.sync(world, camera.position[0], camera.position[2], changes);
       sky.update(clock.state(config.sky), camera.position[1]);
