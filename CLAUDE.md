@@ -19,6 +19,28 @@ Tarayıcıda çalışan, fotogerçekçi görüntüye sahip, tek oyunculu bir vox
 - Bir aşama bitince yaptıklarını ve nasıl test edileceğini kısaca özetle, sonra dur. Bir sonraki aşamaya kendiliğinden geçme.
 - Mimari kararlar değişirse bu dosyanın "Mimari" bölümünü güncelle.
 
+## Güncel durum
+- Tamamlanan aşamalar: 0–8 (GI, ReSTIR DI, denoiser dahil) ve performans turları. Son commit'ler: `0aac389` (8.5 madde 1–2).
+- **Şu an: Aşama 8.5 — Doğal malzeme detayı.** Madde 1 (dünya uzayında doku, 2 m) ve 2 (hex tiling, yükseklik karışımlı varyant sınırları, makro ton, eğim/toz, yosun, çim/yaprak tonu) bitti ve onaylandı. **Sıradaki: madde 3 — aşınmış kenarlar.**
+- Kalan maddeler:
+  3. Aşınmış kenarlar: ışın blok kenarına yakın çarpınca normali yuvarla (bevel); kaya/taşta gürültüyle kırık, çentikli, düzensiz kenarlar; yalnızca açıkta kalan kenarlarda (komşusu dolu kenarda değil).
+  4. Kırık taşlar ve kaya detayı: 8×8×8 alt-voxel (micro-voxel) desteği (ışın bloğa girince iç ızgarada DDA); yeni bloklar pebbles, boulder, mossy_stone, cracked_stone; arazi üreticisi bunları yamaçlara, dere kenarlarına, kaya diplerine dağıtsın.
+  5. Gerçekçi ağaçlar: yaprak bloklarında alt-voxel ince dallar; daha seyrek, katmanlı yaprak dokusu; boy/taç/gövde çeşitliliği, yan dallar; meşe, çam, huş (dağ ormanı çam ağırlıklı); mevcut yaprak transmission korunur.
+  6. Zemin örtüsü: çim üstünde yoğun çim, eğrelti otu, küçük çalılar (alfa testli çapraz düzlemler); ağaç diplerinde düşmüş yaprak ve dal.
+- Aşama kuralları:
+  - Her ana madde bitince dur, sonucu raporla, onay bekle; onaysız sonraki maddeye geçme.
+  - Görsel referans (aşağıda) korunur: genel renk, ışık, hava değişmez; sahte ışık yok.
+  - Performans her adımda ölçülür (`tools/browser.mjs bench`, dönüşümlü varyantlar, birkaç tekrarın minimumu). Alt-voxel + zemin örtüsü toplam kare süresine ≤ 3 ms eklemeli; gerekirse mesafe LOD'u (uzakta alt-voxel ve zemin örtüsü kapalı).
+  - Panelde "Detail" klasörü: her özellik ayrı aç/kapa, yoğunluk ve ölçek.
+  - Her adımda aynı pozlardan önce/sonra görüntüleri `docs/detail-*.png`.
+- Açık notlar:
+  - Ölçümler yalnızca şarjda ve düşük güç modu kapalıyken güvenilir; pilde/ısınınca ±%30 oynuyor (`pmset -g`, `pmset -g batt` ile kontrol et).
+  - Sabah referans pozunda parlak alanlar 4b24741'e göre ~−%10 (ton eşitlemesinin kaldırılmasından; GI payı ~−%3).
+  - Dünya uzayı doku 2 m'de tekrar eder (kaynak dokuların fiziksel boyutu); hex tiling tekrarı kırar.
+  - GI 1/3 çözünürlükte (`resolutionDivisor` 3); yoğun sahnede GI + denoise ~4.6 ms.
+  - WGSL ayrılmış kelimeler: `set`, `patch`, `target`, `smooth` tanımlayıcı olarak kullanılamaz.
+  - 'auto' layout kullanılmayan binding'leri düşürür: shader'a yeni binding eklenince her pass'in `bindGroup(layout, bindings)` listesini güncelle (ör. visibility materyal grubu [0,1,2,3,6,10]).
+
 ## Görsel referans
 - Görsel referans: 4b24741 sky-*.png. Renk/ışık değişikliklerinde bu görünümden uzaklaşma; uzaklaşacaksan önce sor. Sahte, yönsüz dolgu ışığı ekleme.
 - Karşılaştırma pozları (URL): sabah `?cam=0.5,234,0.5,0,-20&time=9.5`, gün batımı `…,90,-8&time=18.6`, alacakaranlık `…,90,5&time=19.4`, gece `…,150,-10&time=23`; pozlama oturana kadar ~10 s bekle. Son karşılaştırma: `docs/restore-compare-*.png`.
