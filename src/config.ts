@@ -36,6 +36,16 @@ export const config = {
     /** Longest frame delta (s) fed into the accumulator; prevents spiral of death after stalls. */
     maxFrameTime: 0.25,
   },
+  /** Energy saving: frame rate cap, lower rate when idle, nothing while the tab is hidden. */
+  power: {
+    /** Frame rate cap (0 = the display rate). */
+    maxFps: 30,
+    /** Frame rate once nothing has moved for `idleAfterSeconds` (0 = no idle mode). */
+    idleFps: 10,
+    idleAfterSeconds: 3,
+    /** Stop the loop while the tab is hidden. */
+    pauseHidden: true,
+  },
   render: {
     /** Internal (traced) resolution relative to the canvas backing size, upscaled in the
      *  blit pass. 0.5 on a Retina canvas ≈ 1440×800 primary rays. */
@@ -242,6 +252,42 @@ export const config = {
     /** Natural materials (stone, dirt, gravel, sand) sample world-space layers covering
      *  2 × 2 m, so walls read as one surface instead of a block grid. */
     worldTextures: true,
+    /** Anti-tiling for world-space layers: hex tiling (Mikkelsen 2022) — each lookup blends
+     *  three randomly rotated and shifted hex cells. Density = hex cells per layer edge
+     *  (0 = off); contrast sharpens the blend weights (higher = less blur between cells). */
+    hexDensity: 1.5,
+    hexContrast: 4,
+    /** Distance LOD (blocks): beyond it hex tiling (3× texture lookups) is off — the 2 m
+     *  repeat is sub-pixel there anyway. */
+    hexMaxDistance: 32,
+    /** Soft variant region borders: blend band (fraction of one variant's share of the
+     *  region noise, 0 = hard borders) and irregularity of the border line. */
+    variantBlend: 0.03,
+    variantEdgeNoise: 0.03,
+    /** Variant borders blend by the texture height maps (pebble tops first); the height
+     *  range over which both variants show (0 = linear blend). */
+    heightBlendDepth: 0.2,
+    /** Macro variation of natural materials: tone shifts over `macroScale` metres (dark ↔
+     *  light, warm ↔ cool), strength 0 = off. */
+    macroScale: 24,
+    macroStrength: 0.5,
+    macroWarm: [1.07, 0.99, 0.88] as [number, number, number],
+    macroCool: [0.93, 0.97, 1.05] as [number, number, number],
+    /** Flat faces lighter and dusty, steep faces darker and bare (0 = off). */
+    slopeStrength: 0.5,
+    dustTint: [1.1, 1.06, 0.98] as [number, number, number],
+    /** Moss patches on natural materials near water, leaves and logs (0 = off), linear
+     *  albedo of moss. */
+    moss: 0.6,
+    /** Moss (8 voxel probes per pixel) only within this distance (blocks). */
+    mossMaxDistance: 32,
+    mossColor: [0.05, 0.08, 0.02] as [number, number, number],
+    /** Grass and leaves: moisture noise over `foliageScale` metres tints between dry
+     *  (yellowish) and lush (dark green); strength 0 = off. */
+    foliageStrength: 0.8,
+    foliageScale: 40,
+    foliageDry: [1.12, 1.05, 0.7] as [number, number, number],
+    foliageLush: [0.8, 0.93, 0.74] as [number, number, number],
   },
   sky: {
     /** Time of day at start (hours, 12 = solar noon). */

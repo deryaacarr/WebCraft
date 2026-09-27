@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FixedStepClock } from './loop';
+import { FixedStepClock, FramePacer } from './loop';
 
 const STEP = 1 / 60;
 const MAX_FRAME = 0.25;
@@ -55,5 +55,37 @@ describe('FixedStepClock', () => {
     // No frame exceeds MAX_FRAME, so no time is dropped.
     expect(clock.simTime).toBeLessThanOrEqual(total);
     expect(total - clock.simTime).toBeLessThan(STEP);
+  });
+});
+
+describe('FramePacer', () => {
+  const cfg = { maxFps: 30, idleFps: 10, idleAfterSeconds: 3 };
+  /** Display refreshes at `hz` from `from` ms for `frames` frames; how many ran. */
+  const runs = (pacer: FramePacer, from: number, to: number, hz = 60) => {
+    let n = 0;
+    const frames = Math.round(((to - from) * hz) / 1000);
+    for (let i = 0; i < frames; i++) if (pacer.shouldRun(from + (i * 1000) / hz)) n++;
+    return n;
+  };
+
+  it('caps a 60 Hz display at 30 fps while active', () => {
+    const pacer = new FramePacer(() => cfg);
+    pacer.markActive(0);
+    expect(runs(pacer, 0, 1000)).toBe(30);
+  });
+
+  it('drops to the idle rate after the idle delay', () => {
+    const pacer = new FramePacer(() => cfg);
+    pacer.markActive(0);
+    runs(pacer, 0, 3000);
+    expect(pacer.targetFps(3500)).toBe(10);
+    expect(runs(pacer, 4000, 5000)).toBe(10);
+    pacer.markActive(5000);
+    expect(pacer.targetFps(5000)).toBe(30);
+  });
+
+  it('runs every display frame when uncapped', () => {
+    const pacer = new FramePacer(() => ({ maxFps: 0, idleFps: 0, idleAfterSeconds: 3 }));
+    expect(runs(pacer, 0, 1000, 120)).toBe(120);
   });
 });

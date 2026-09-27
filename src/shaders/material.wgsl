@@ -28,7 +28,29 @@ struct MaterialParams {
   /// World-space layers: edge (m) of the area one layer covers, and on/off.
   world_span: f32,
   world_enabled: u32,
-  _pad2: f32,
+  /// Detail (config.detail; material-detail.wgsl). Colours are three scalars each.
+  hex_density: f32,
+  hex_contrast: f32,
+  variant_blend: f32,
+  variant_edge_noise: f32,
+  macro_scale: f32,
+  macro_strength: f32,
+  slope_strength: f32,
+  moss: f32,
+  foliage_strength: f32,
+  foliage_scale: f32,
+  warm_r: f32, warm_g: f32, warm_b: f32,
+  cool_r: f32, cool_g: f32, cool_b: f32,
+  dust_r: f32, dust_g: f32, dust_b: f32,
+  moss_r: f32, moss_g: f32, moss_b: f32,
+  dry_r: f32, dry_g: f32, dry_b: f32,
+  lush_r: f32, lush_g: f32, lush_b: f32,
+  /// Distance LOD (blocks) of hex tiling and moss.
+  hex_max_distance: f32,
+  moss_max_distance: f32,
+  height_blend_depth: f32,
+  _pad3: f32,
+  _pad4: f32,
 };
 
 /// Per material: first texture layer, number of variants, flags.
@@ -46,6 +68,10 @@ const MATERIAL_ALPHA_TEST: u32 = 4u;
 /// Natural material with world-space layers; their first index is flags >> 8.
 const MATERIAL_WORLD: u32 = 8u;
 const MATERIAL_WORLD_FIRST_SHIFT: u32 = 8u;
+/// Detail categories: natural rock / soil, foliage, moisture source (moss nearby).
+const MATERIAL_NATURAL: u32 = 16u;
+const MATERIAL_FOLIAGE: u32 = 32u;
+const MATERIAL_MOIST: u32 = 64u;
 const F0_METAL: f32 = 230.0 / 255.0;
 
 @group(2) @binding(0) var<uniform> material_params: MaterialParams;
@@ -60,6 +86,10 @@ const F0_METAL: f32 = 230.0 / 255.0;
 @group(2) @binding(7) var tex_world_albedo: texture_2d_array<f32>;
 @group(2) @binding(8) var tex_world_normal: texture_2d_array<f32>;
 @group(2) @binding(9) var tex_world_specular: texture_2d_array<f32>;
+/// Smooth tileable value noise (materials.ts detailNoiseVolume): 64³ texels, a lattice
+/// cell every 4 texels, period 16 cells.
+@group(2) @binding(10) var detail_noise: texture_3d<f32>;
+const NOISE_PERIOD: f32 = 16.0;
 
 /// Tangent frame of a voxel face: T = +u direction, B = "image up" (−v). Chosen so no
 /// face is mirrored (T × B = N) and side faces have image-up = world-up.
@@ -99,6 +129,12 @@ fn hash3(c: vec3i) -> f32 {
   return f32(hashCellFace(c, 7u) >> 8u) / 16777216.0;
 }
 
+/// Smooth 3D value noise in [0, 1] from the baked volume: one trilinear lookup (the
+/// hashed valueNoise below costs eight hashes). Repeats every 16 units of `p`.
+fn fastNoise(p: vec3f) -> f32 {
+  return textureSampleLevel(detail_noise, tex_sampler, p / NOISE_PERIOD, 0.0).r;
+}
+
 /// Smooth 3D value noise in [0, 1].
 fn valueNoise(p: vec3f) -> f32 {
   let i = vec3i(floor(p));
@@ -126,9 +162,38 @@ fn regionVariant(cell: vec3i, material: u32, count: u32) -> u32 {
   return u32(v * f32(count));
 }
 
+/// Region noise value in [0, 1) at a world position (continuous: region borders can run
+/// through blocks), with a fine irregularity on the border line. See regionVariant.
+fn regionValue(pos: vec3f, material: u32) -> f32 {
+  let p = pos / material_params.variant_scale + f32(material) * 17.31;
+  let warp = fastNoise(p * 0.5 + 31.7) - 0.5;
+  let q = p + vec3f(0.8, 0.5, -0.6) * (warp * 2.0 * material_params.variant_warp);
+  var n = fastNoise(q) * 0.7 + fastNoise(q * 2.3 + 5.1) * 0.3;
+  n += (fastNoise(pos * 0.6 + 7.7) - 0.5) * 2.0 * material_params.variant_edge_noise;
+  return clamp((n - 0.5) * 2.2 + 0.5, 0.0, 0.9999);
+}
+
+/// Height blend (as in terrain splatting): weight of B for linear weight `t`, from the two
+/// height maps; `depth` = height range over which both show (0 = plain linear blend).
+fn heightBlend(ha: f32, hb: f32, t: f32, depth: f32) -> f32 {
+  if (depth <= 0.0) {
+    return t;
+  }
+  let a = ha + (1.0 - t);
+  let b = hb + t;
+  let top = max(a, b) - depth;
+  let wa = max(a - top, 0.0);
+  let wb = max(b - top, 0.0);
+  return wb / max(wa + wb, 1e-6);
+}
+
 /// Where and how a voxel face samples its material.
 struct FaceMapping {
   layer: u32,
+  /// World-space layers: the neighbouring variant across a region border and its weight
+  /// (0 away from borders; 0.5 on the border line, so both sides meet continuously).
+  layer2: u32,
+  blend: f32,
   flags: u32,
   /// Sampled from the world-space arrays (natural materials).
   world: bool,
@@ -159,6 +224,8 @@ fn faceMapping(material: u32, cell: vec3i, face: u32, local: vec3f) -> FaceMappi
   m.n = frame.n;
   m.world = false;
   m.uv_scale = 1.0;
+  m.layer2 = m.layer;
+  m.blend = 0.0;
   if ((info.flags & MATERIAL_WORLD) != 0u && material_params.world_enabled != 0u) {
     // Natural material: UV from the world position on the face plane, one layer per
     // world_span × world_span m, no per-block rotation — continuous across blocks, so no
@@ -167,7 +234,28 @@ fn faceMapping(material: u32, cell: vec3i, face: u32, local: vec3f) -> FaceMappi
     let q = vec3f(((cell % span) + span) % span) + local;
     m.world = true;
     m.uv_scale = 1.0 / material_params.world_span;
-    m.layer = (info.flags >> MATERIAL_WORLD_FIRST_SHIFT) + variant;
+    let first = info.flags >> MATERIAL_WORLD_FIRST_SHIFT;
+    m.layer = first + variant;
+    m.layer2 = m.layer;
+    if (material_params.variant_scale > 0.0 && count > 1u) {
+      // Variant from the region noise at the hit point itself, not the block centre; near
+      // a border the neighbouring variant is blended in over a band of the noise value.
+      let f = regionValue(vec3f(cell) + local, material) * f32(count);
+      let i = min(u32(f), count - 1u);
+      let frac = f - f32(i);
+      let band = material_params.variant_blend;
+      m.layer = first + i;
+      m.layer2 = m.layer;
+      if (band > 0.0) {
+        if (frac > 0.5 && i + 1u < count) {
+          m.layer2 = first + i + 1u;
+          m.blend = 0.5 * smoothstep(1.0 - band, 1.0, frac);
+        } else if (frac <= 0.5 && i > 0u) {
+          m.layer2 = first + i - 1u;
+          m.blend = 0.5 * (1.0 - smoothstep(0.0, band, frac));
+        }
+      }
+    }
     m.uv = vec2f(dot(q, frame.t), -dot(q, frame.b)) * m.uv_scale;
     m.t = frame.t;
     m.b = frame.b;
@@ -247,9 +335,129 @@ fn coneLod(dir: vec3f, n: vec3f, width: f32) -> f32 {
   return log2(max(width * inverseSqrt(cos_n) * material_params.texture_size, 1e-6)) + material_params.lod_bias;
 }
 
+// ------------------------------------------------------------------ hex tiling
+// Anti-tiling for world-space layers (Mikkelsen 2022, "Practical Real-Time Hex-Tiling"):
+// the UV plane is covered by a triangle grid; every vertex is the centre of a hex cell
+// with its own random rotation and offset into the texture, and a lookup blends the three
+// cells around the point with barycentric weights (sharpened by hex_contrast).
+
+struct HexTiles {
+  uv0: vec2f,
+  uv1: vec2f,
+  uv2: vec2f,
+  /// Cell rotations (cos, sin).
+  r0: vec2f,
+  r1: vec2f,
+  r2: vec2f,
+  w: vec3f,
+};
+
+fn rotate2(r: vec2f, v: vec2f) -> vec2f {
+  return vec2f(r.x * v.x - r.y * v.y, r.y * v.x + r.x * v.y);
+}
+
+/// Random rotation (cos, sin) and offset of the hex cell at triangle-grid vertex `v`;
+/// returns the cell's texture UV for `uv`.
+fn hexCell(v: vec2f, uv: vec2f, k: f32, r: ptr<function, vec2f>) -> vec2f {
+  let h = hashCellFace(vec3i(vec2i(v), 911), 3u);
+  let angle = f32(h & 0xffffu) / 65536.0 * 6.28318530718;
+  let offset = vec2f(f32((h >> 16u) & 0xffu), f32(h >> 24u)) / 256.0;
+  *r = vec2f(cos(angle), sin(angle));
+  let centre = vec2f(v.x + v.y * 0.5, v.y * 0.8660254) / k;
+  return rotate2(*r, uv - centre) + centre + offset;
+}
+
+fn hexTiles(uv: vec2f) -> HexTiles {
+  let k = material_params.hex_density * 3.4641016; // 2√3 triangle-grid units per UV unit
+  let st = uv * k;
+  let skewed = vec2f(st.x - st.y * 0.57735027, st.y * 1.15470054);
+  let base = floor(skewed);
+  let f = skewed - base;
+  let z = 1.0 - f.x - f.y;
+  var v0 = base;
+  var v1 = base + vec2f(0.0, 1.0);
+  var v2 = base + vec2f(1.0, 0.0);
+  var w = vec3f(z, f.y, f.x);
+  if (z <= 0.0) {
+    v0 = base + vec2f(1.0, 1.0);
+    w = vec3f(-z, 1.0 - f.y, 1.0 - f.x);
+  }
+  var t: HexTiles;
+  t.uv0 = hexCell(v0, uv, k, &t.r0);
+  t.uv1 = hexCell(v1, uv, k, &t.r1);
+  t.uv2 = hexCell(v2, uv, k, &t.r2);
+  let sharp = pow(max(w, vec3f(0.0)), vec3f(material_params.hex_contrast));
+  t.w = sharp / max(sharp.x + sharp.y + sharp.z, 1e-6);
+  return t;
+}
+
+fn hexSample(tex: texture_2d_array<f32>, layer: u32, t: HexTiles, g: Gradients) -> vec4f {
+  return textureSampleGrad(tex, tex_sampler, t.uv0, layer, rotate2(t.r0, g.ddx), rotate2(t.r0, g.ddy)) * t.w.x +
+    textureSampleGrad(tex, tex_sampler, t.uv1, layer, rotate2(t.r1, g.ddx), rotate2(t.r1, g.ddy)) * t.w.y +
+    textureSampleGrad(tex, tex_sampler, t.uv2, layer, rotate2(t.r2, g.ddx), rotate2(t.r2, g.ddy)) * t.w.z;
+}
+
+/// Normal texel of one hex cell with its tangent-space xy rotated back into the surface's
+/// frame (x = +u, y = image up = −v); b (AO) and a (height) as stored.
+fn hexNormalCell(tex: texture_2d_array<f32>, layer: u32, uv: vec2f, r: vec2f, g: Gradients) -> vec4f {
+  let n = textureSampleGrad(tex, tex_sampler, uv, layer, rotate2(r, g.ddx), rotate2(r, g.ddy));
+  let xy = n.xy * 2.0 - 1.0;
+  // Texture UV = R · surface UV, so a texture-space vector maps back with Rᵀ (in u, v).
+  let back = rotate2(vec2f(r.x, -r.y), vec2f(xy.x, -xy.y));
+  return vec4f(vec2f(back.x, -back.y) * 0.5 + 0.5, n.b, n.a);
+}
+
+fn hexSampleNormal(tex: texture_2d_array<f32>, layer: u32, t: HexTiles, g: Gradients) -> vec4f {
+  return hexNormalCell(tex, layer, t.uv0, t.r0, g) * t.w.x + hexNormalCell(tex, layer, t.uv1, t.r1, g) * t.w.y +
+    hexNormalCell(tex, layer, t.uv2, t.r2, g) * t.w.z;
+}
+
+/// The three maps of one layer at `uv`: hex-tiled for world-space layers when enabled.
+struct TexelSet {
+  albedo: vec4f,
+  normal: vec4f,
+  specular: vec4f,
+};
+
+fn sampleSet(m: FaceMapping, layer: u32, uv: vec2f, g: Gradients, hex: bool) -> TexelSet {
+  if (hex) {
+    let t = hexTiles(uv);
+    return TexelSet(hexSample(tex_world_albedo, layer, t, g), hexSampleNormal(tex_world_normal, layer, t, g),
+      hexSample(tex_world_specular, layer, t, g));
+  }
+  var ml = m;
+  ml.layer = layer;
+  return TexelSet(sampleAlbedo(ml, uv, g), sampleNormal(ml, uv, g), sampleSpecular(ml, uv, g));
+}
+
+/// Height (0..1) for parallax: world-space layers read the dominant hex cell only (one
+/// lookup per march step).
+fn parallaxHeight(m: FaceMapping, uv: vec2f, g: Gradients, dominant: HexTiles, hex: bool) -> f32 {
+  if (hex) {
+    var uv_t = dominant.uv0;
+    var r = dominant.r0;
+    if (dominant.w.y > dominant.w.x && dominant.w.y >= dominant.w.z) {
+      uv_t = dominant.uv1;
+      r = dominant.r1;
+    } else if (dominant.w.z > dominant.w.x && dominant.w.z > dominant.w.y) {
+      uv_t = dominant.uv2;
+      r = dominant.r2;
+    }
+    // Follow the march: the dominant cell's transform applied to the shifted UV.
+    let shifted = uv_t + rotate2(r, uv - m.uv);
+    return textureSampleGrad(tex_world_normal, tex_sampler, shifted, m.layer, rotate2(r, g.ddx), rotate2(r, g.ddy)).a;
+  }
+  return sampleNormal(m, uv, g).a;
+}
+
 /// Parallax occlusion mapping: marches the height field along the view ray (tangent
 /// space) and returns the UV where it enters the surface.
-fn parallaxUv(m: FaceMapping, dir: vec3f, g: Gradients) -> vec2f {
+/// Hex tiling for this lookup: world-space layer, enabled, within the LOD distance.
+fn useHex(m: FaceMapping, t: f32) -> bool {
+  return m.world && material_params.hex_density > 0.0 && t < material_params.hex_max_distance;
+}
+
+fn parallaxUv(m: FaceMapping, dir: vec3f, g: Gradients, t: f32) -> vec2f {
   let depth = material_params.pom_depth;
   let steps = max(material_params.pom_steps, 1u);
   let v = -dir;
@@ -261,8 +469,13 @@ fn parallaxUv(m: FaceMapping, dir: vec3f, g: Gradients) -> vec2f {
   var prev_uv = uv;
   var d = 0.0;
   var prev_gap = 0.0;
+  let hex = useHex(m, t);
+  var dominant: HexTiles;
+  if (hex) {
+    dominant = hexTiles(m.uv);
+  }
   for (var i = 0u; i <= steps; i++) {
-    let surface = 1.0 - sampleNormal(m, uv, g).a;
+    let surface = 1.0 - parallaxHeight(m, uv, g, dominant, hex);
     let gap = d - surface;
     if (gap >= 0.0) {
       // Interpolate between the last point above and the first point below the surface:
@@ -298,11 +511,21 @@ fn shadeSurface(material: u32, cell: vec3i, face: u32, local: vec3f, dir: vec3f,
   let g = coneGradients(m, dir, t * material_params.pixel_spread);
   var uv = m.uv;
   if ((m.flags & MATERIAL_POM) != 0u && material_params.pom_depth > 0.0 && t < material_params.pom_max_distance) {
-    uv = parallaxUv(m, dir, g);
+    uv = parallaxUv(m, dir, g, t);
   }
-  let a = sampleAlbedo(m, uv, g);
-  let nm = sampleNormal(m, uv, g);
-  let sp = sampleSpecular(m, uv, g);
+  let hex = useHex(m, t);
+  var texels = sampleSet(m, m.layer, uv, g, hex);
+  if (m.blend > 0.0) {
+    // Variant region border: blend the neighbouring variant, by height — the higher
+    // texels (pebble tops) of the incoming variant take over first.
+    let other = sampleSet(m, m.layer2, uv, g, hex);
+    let w = heightBlend(texels.normal.a, other.normal.a, m.blend, material_params.height_blend_depth);
+    texels = TexelSet(mix(texels.albedo, other.albedo, w), mix(texels.normal, other.normal, w),
+      mix(texels.specular, other.specular, w));
+  }
+  let a = texels.albedo;
+  let nm = texels.normal;
+  let sp = texels.specular;
 
   let xy = nm.xy * 2.0 - 1.0;
   let ts = vec3f(xy, sqrt(max(1.0 - dot(xy, xy), 0.0)));
@@ -315,6 +538,7 @@ fn shadeSurface(material: u32, cell: vec3i, face: u32, local: vec3f, dir: vec3f,
   s.metalness = select(0.0, 1.0, sp.g >= F0_METAL);
   s.emission = select(sp.a * 255.0 / 254.0, 0.0, sp.a >= 1.0);
   s.subsurface = sp.b;
+  applyDetail(&s, material, m.flags, cell, face, local, m.n, t);
   return s;
 }
 
@@ -332,3 +556,5 @@ fn alphaOpaque(block_id: u32, cell: vec3i, normal: vec3i, local: vec3f, dir: vec
   let lod = coneLod(dir, m.n, t * material_params.pixel_spread);
   return textureSampleLevel(tex_albedo, tex_sampler, m.uv, m.layer, lod).a >= material_params.alpha_cutoff;
 }
+
+#include "material-detail.wgsl"

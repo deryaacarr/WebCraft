@@ -177,7 +177,7 @@ export class VisibilityPass implements RenderPass {
     pass.setBindGroup(0, this.traceGroup);
     pass.setBindGroup(1, this.brickmap.bindGroup(this.layouts.brickmap));
     // Alpha testing only reads albedo: params, tables, albedo array, sampler.
-    pass.setBindGroup(2, this.materials.bindGroup(this.layouts.materials, [0, 1, 2, 3, 6]));
+    pass.setBindGroup(2, this.materials.bindGroup(this.layouts.materials, [0, 1, 2, 3, 6, 10]));
     pass.setBindGroup(3, this.sky.bindGroup(this.layouts.sky, [0]));
     pass.dispatchWorkgroups(Math.ceil(w / block), Math.ceil(h / block));
     pass.setPipeline(this.temporalPipeline);

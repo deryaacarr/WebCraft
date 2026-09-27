@@ -145,11 +145,16 @@ async function main(): Promise<void> {
       },
     });
 
+  // Energy saving: full frame rate while something happens, idle rate otherwise.
+  let lastPose = '';
   const loop = new GameLoop({
     update: (dt) => {
       const minutes = config.sky.dayLengthMinutes;
       if (!config.sky.paused && minutes > 0) clock.advance((dt * 86400) / (minutes * 60));
       camera.update(dt, input);
+      const pose = `${camera.position.join(',')},${camera.yaw},${camera.pitch}`;
+      if (pose !== lastPose || streamer.stats.missing > 0) loop.markActive();
+      lastPose = pose;
       const [x, y, z] = camera.position;
       streamer.update(x, y, z);
       input.endTick();
@@ -168,6 +173,10 @@ async function main(): Promise<void> {
       debug.endFrame();
     },
   });
+
+  for (const type of ['keydown', 'pointermove', 'pointerdown', 'wheel'] as const) {
+    window.addEventListener(type, () => loop.markActive(), { passive: true });
+  }
 
   gpu.device.lost.then((info) => {
     loop.stop();

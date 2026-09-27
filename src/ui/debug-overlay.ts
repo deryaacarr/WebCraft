@@ -154,6 +154,10 @@ export class DebugOverlay {
     this.gui.add(config.debug, 'view', [...DEBUG_VIEWS]).name('view');
 
     const sim = this.gui.addFolder('Simulation');
+    sim.add(config.power, 'maxFps', 0, 240, 1).name('frame rate cap (0 = display)');
+    sim.add(config.power, 'idleFps', 0, 60, 1).name('idle frame rate (0 = off)');
+    sim.add(config.power, 'idleAfterSeconds', 0.5, 30, 0.5).name('idle after (s)');
+    sim.add(config.power, 'pauseHidden').name('pause when tab hidden');
     sim.add(config.sim, 'tickRate', 10, 240, 1).name('tick rate (Hz)');
     sim.add(config.sim, 'maxFrameTime', 0.05, 1, 0.01).name('max frame (s)');
 
@@ -418,6 +422,19 @@ export class DebugOverlay {
     const d = config.detail;
     const f = this.gui.addFolder('Detail');
     f.add(d, 'worldTextures').name('world-space textures (natural)');
+    f.add(d, 'hexDensity', 0, 4, 0.1).name('anti-tiling hex cells (0 = off)');
+    f.add(d, 'hexContrast', 1, 16, 0.5).name('anti-tiling blend contrast');
+    f.add(d, 'hexMaxDistance', 0, 256, 1).name('anti-tiling LOD distance');
+    f.add(d, 'variantBlend', 0, 0.5, 0.01).name('variant border blend (0 = hard)');
+    f.add(d, 'variantEdgeNoise', 0, 0.3, 0.01).name('variant border irregularity');
+    f.add(d, 'heightBlendDepth', 0, 1, 0.02).name('variant border height blend');
+    f.add(d, 'macroStrength', 0, 1, 0.05).name('macro variation');
+    f.add(d, 'macroScale', 5, 100, 1).name('macro scale (m)');
+    f.add(d, 'slopeStrength', 0, 1, 0.05).name('slope: dusty flats / bare steeps');
+    f.add(d, 'moss', 0, 1, 0.05).name('moss near water / trees');
+    f.add(d, 'mossMaxDistance', 0, 256, 1).name('moss LOD distance');
+    f.add(d, 'foliageStrength', 0, 1, 0.05).name('grass & leaf tint');
+    f.add(d, 'foliageScale', 5, 150, 1).name('grass & leaf tint scale (m)');
     f.close();
   }
 

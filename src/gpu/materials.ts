@@ -29,8 +29,25 @@ const FLAG_ALPHA_TEST = 4;
 /** Has world-space layers; their first index is stored in flags bits 8+ (material.wgsl). */
 const FLAG_WORLD = 8;
 const WORLD_FIRST_SHIFT = 8;
-// MaterialParams in material.wgsl: 7 scalars + pad → 32 bytes.
-const PARAMS_SIZE = 48;
+/** Detail categories (material-detail.wgsl): natural rock/soil, foliage, moisture source. */
+const FLAG_NATURAL = 16;
+const FLAG_FOLIAGE = 32;
+const FLAG_MOIST = 64;
+const CATEGORY_FLAGS: Partial<Record<MaterialName, number>> = {
+  stone: FLAG_NATURAL,
+  cobblestone: FLAG_NATURAL,
+  gravel: FLAG_NATURAL,
+  dirt: FLAG_NATURAL,
+  sand: FLAG_NATURAL,
+  grass_top: FLAG_FOLIAGE,
+  grass_side: FLAG_FOLIAGE,
+  oak_leaves: FLAG_FOLIAGE | FLAG_MOIST,
+  water: FLAG_MOIST,
+  oak_log_side: FLAG_MOIST,
+  oak_log_top: FLAG_MOIST,
+};
+// MaterialParams in material.wgsl: 44 scalars (colours as three scalars each).
+const PARAMS_SIZE = 176;
 const TEXTURE_BASE = `${import.meta.env.BASE_URL}textures/`;
 
 /** Layer data for all materials at one resolution: [kind][layer][texel RGBA8]. */
@@ -54,6 +71,8 @@ export class MaterialSystem {
   /** World-space arrays (albedo, normal, specular); 1×1 stand-ins when not packed. */
   private worldArrays: GPUTexture[] = [];
   private worldSpan = 1;
+  /** Tileable smooth value noise for material detail (see detailNoiseVolume). */
+  private readonly noise: GPUTexture;
   private sampler!: GPUSampler;
   private readonly params: GPUBuffer;
   private materialTable!: GPUBuffer;
@@ -78,6 +97,15 @@ export class MaterialSystem {
     BLOCKS.forEach((b, i) => faces.set([b.materials.top, b.materials.side, b.materials.bottom, 0], i * 4));
     this.blockTable = device.createBuffer({ label: 'block-faces', size: faces.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.blockTable, 0, faces);
+    const size = NOISE_TEXELS;
+    this.noise = device.createTexture({
+      label: 'detail-noise',
+      size: { width: size, height: size, depthOrArrayLayers: size },
+      dimension: '3d',
+      format: 'r8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    device.queue.writeTexture({ texture: this.noise }, detailNoiseVolume(), { bytesPerRow: size, rowsPerImage: size }, { width: size, height: size, depthOrArrayLayers: size });
   }
 
   get stats(): MaterialStats {
@@ -124,6 +152,7 @@ export class MaterialSystem {
       mipmapFilter: 'linear',
       addressModeU: 'repeat',
       addressModeV: 'repeat',
+      addressModeW: 'repeat', // the detail noise volume tiles in 3D
       maxAnisotropy: config.textures.maxAnisotropy,
     });
     this.version++;
@@ -144,12 +173,16 @@ export class MaterialSystem {
     f32[7] = t.variantRegionScale;
     f32[8] = t.variantWarp;
     f32[9] = this.worldSpan;
-    u32[10] = config.detail.worldTextures && this.worldArrays[0]!.width > 1 ? 1 : 0;
+    const d = config.detail;
+    u32[10] = d.worldTextures && this.worldArrays[0]!.width > 1 ? 1 : 0;
+    f32.set([d.hexDensity, d.hexContrast, d.variantBlend, d.variantEdgeNoise, d.macroScale, d.macroStrength, d.slopeStrength, d.moss, d.foliageStrength, d.foliageScale], 11);
+    f32.set([...d.macroWarm, ...d.macroCool, ...d.dustTint, ...d.mossColor, ...d.foliageDry, ...d.foliageLush], 21);
+    f32.set([d.hexMaxDistance, d.mossMaxDistance, d.heightBlendDepth], 39);
     this.device.queue.writeBuffer(this.params, 0, this.paramData);
   }
 
   /** Bind group for @group(2); `bindings` = the material.wgsl bindings the pipeline uses. */
-  bindGroup(layout: GPUBindGroupLayout, bindings: readonly number[] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]): GPUBindGroup {
+  bindGroup(layout: GPUBindGroupLayout, bindings: readonly number[] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]): GPUBindGroup {
     const cached = this.bindGroups.get(layout);
     if (cached && cached.version === this.version) return cached.group;
     const [albedo, normal, specular] = this.arrays;
@@ -163,6 +196,7 @@ export class MaterialSystem {
       specular.createView({ dimension: '2d-array' }),
       this.sampler,
       ...this.worldArrays.map((t) => t.createView({ dimension: '2d-array' })),
+      this.noise.createView(),
     ];
     const group = this.device.createBindGroup({
       label: 'materials',
@@ -258,7 +292,7 @@ export class MaterialSystem {
     const coverage = meanCoverage(set);
     const tableFloats = new Float32Array(table.buffer);
     set.materials.forEach((m, i) => {
-      table.set([m.firstLayer, m.count, m.flags], i * 4);
+      table.set([m.firstLayer, m.count, m.flags | (CATEGORY_FLAGS[MATERIAL_NAMES[i]!] ?? 0)], i * 4);
       tableFloats[i * 4 + 3] = coverage[i]!;
     });
     this.materialTable?.destroy();
@@ -363,5 +397,47 @@ export function meanCoverage(set: LayerSet): Float32Array {
     }
     out[i] = sum / 255 / Math.max(1, m.count * texels);
   });
+  return out;
+}
+
+/** Detail noise volume: texels per edge and lattice cells per edge (material.wgsl). */
+const NOISE_TEXELS = 64;
+const NOISE_CELLS = 16;
+
+/**
+ * Smooth, tileable 3D value noise baked into NOISE_TEXELS³ bytes: random values on a
+ * NOISE_CELLS³ lattice (periodic), smoothstep-interpolated in between. The shader reads it
+ * with one trilinear lookup instead of hashing eight lattice corners. Deterministic.
+ */
+export function detailNoiseVolume(): Uint8Array {
+  const n = NOISE_CELLS;
+  const lattice = new Float32Array(n * n * n);
+  let state = 0x9e3779b9;
+  for (let i = 0; i < lattice.length; i++) {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let r = Math.imul(state ^ (state >>> 15), 1 | state);
+    r = (r + Math.imul(r ^ (r >>> 7), 61 | r)) ^ r;
+    lattice[i] = ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  }
+  const at = (x: number, y: number, z: number) => lattice[(((z % n) * n + (y % n)) * n) + (x % n)]!;
+  const smooth = (t: number) => t * t * (3 - 2 * t);
+  const size = NOISE_TEXELS;
+  const per = size / n;
+  const out = new Uint8Array(size * size * size);
+  for (let z = 0; z < size; z++) {
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const cx = Math.floor(x / per), cy = Math.floor(y / per), cz = Math.floor(z / per);
+        const fx = smooth((x % per) / per), fy = smooth((y % per) / per), fz = smooth((z % per) / per);
+        const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+        const x00 = lerp(at(cx, cy, cz), at(cx + 1, cy, cz), fx);
+        const x10 = lerp(at(cx, cy + 1, cz), at(cx + 1, cy + 1, cz), fx);
+        const x01 = lerp(at(cx, cy, cz + 1), at(cx + 1, cy, cz + 1), fx);
+        const x11 = lerp(at(cx, cy + 1, cz + 1), at(cx + 1, cy + 1, cz + 1), fx);
+        const v = lerp(lerp(x00, x10, fy), lerp(x01, x11, fy), fz);
+        out[(z * size + y) * size + x] = Math.round(v * 255);
+      }
+    }
+  }
   return out;
 }
