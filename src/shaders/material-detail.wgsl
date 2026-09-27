@@ -74,8 +74,10 @@ fn applyDetail(s: ptr<function, Surface>, material: u32, flags: u32, cell: vec3i
       let north = smoothstep(0.5, 0.9, -n.z) * (1.0 - abs(n.y));
       let wet = max(moisture(cell), max(overhang(cell, n) * 0.8, north * 0.3));
       if (wet > 0.0) {
-        let blotch = fastNoise(pos * 0.9 + 19.7) * 0.7 + fastNoise(pos * 3.1) * 0.3;
-        let cover = smoothstep(0.35, 0.6, blotch * 0.6 + wet * 0.5) * p.moss * (0.6 + 0.4 * max(n.y, 0.0));
+        // Crisp patches (narrow threshold), not a tint over the whole face: the block must
+        // still read as its own material.
+        let blotch = fastNoise(pos * 1.4 + 19.7) * 0.65 + fastNoise(pos * 4.3) * 0.35;
+        let cover = smoothstep(0.44, 0.52, blotch * 0.6 + wet * 0.4) * p.moss * (0.6 + 0.4 * max(n.y, 0.0));
         albedo = mix(albedo, detailColor(p.moss_r, p.moss_g, p.moss_b) * (0.8 + 0.4 * blotch), cover);
         (*s).roughness = mix((*s).roughness, 0.9, cover);
       }

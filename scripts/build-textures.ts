@@ -346,6 +346,32 @@ async function buildVariant(v: VariantSource): Promise<Layer> {
   }
 }
 
+/** Brightness spread allowed between variants of one block type (see main). */
+const VARIANT_TONE_RANGE = 0.2;
+
+const toLinear = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+const toSrgb = (c: number) => (c <= 0.0031308 ? c * 12.92 : 1.055 * c ** (1 / 2.4) - 0.055);
+
+/** Opacity-weighted mean linear luminance of a layer's albedo. */
+function meanLuminance(layer: Layer): number {
+  const c = layer.color.data;
+  let sum = 0;
+  let weight = 0;
+  for (let i = 0; i < c.length; i += 4) {
+    sum += c[i + 3]! * (0.2126 * toLinear(c[i]!) + 0.7152 * toLinear(c[i + 1]!) + 0.0722 * toLinear(c[i + 2]!));
+    weight += c[i + 3]!;
+  }
+  return sum / Math.max(weight, 1e-6);
+}
+
+/** Scales a layer's albedo in linear light (keeps hue and texture detail). */
+function scaleLinear(layer: Layer, gain: number): void {
+  const c = layer.color.data;
+  for (let i = 0; i < c.length; i += 4) {
+    for (let k = 0; k < 3; k++) c[i + k] = toSrgb(Math.min(1, toLinear(c[i + k]!) * gain));
+  }
+}
+
 /** The three RGBA8 layers at working resolution. */
 function encode(layer: Layer): Record<(typeof KINDS)[number], Uint8Array> {
   const N = layer.color.width * layer.color.height;
@@ -403,23 +429,36 @@ async function main(): Promise<void> {
   const materials: Record<string, { firstLayer: number; count: number; rotate: boolean; pom: boolean; alphaTest: boolean; worldFirstLayer?: number }> = {};
   for (const [material, spec] of Object.entries(TEXTURE_SPEC)) {
     materials[material] = { firstLayer: layers.length, count: spec.variants.length, rotate: spec.rotate, pom: spec.pom, alphaTest: spec.alphaTest };
-    if (spec.world) {
-      materials[material]!.worldFirstLayer = worldLayers.length;
-      for (const [i, v] of spec.variants.entries()) {
-        if (v.kind !== 'ambientcg') throw new Error(`${material}: world-space layers need ambientCG sources`);
-        worldLayers.push({ material, variant: i, source: v.id, data: encode(await loadAmbientCg(v, WORLD_SPAN)) });
-      }
-    }
+    // Variants of one block type may differ in brightness by at most ±VARIANT_TONE_RANGE
+    // around their geometric mean (readability: a variant must not look like another
+    // material). Gains are measured on the block layers and applied to world layers too.
+    const gains: number[] = [];
     const built: Layer[] = [];
     const labels: string[] = [];
     for (const v of spec.variants) {
       labels.push(v.kind === 'ambientcg' ? v.id : v.kind === 'procedural' ? `procedural:${v.generator}` : v.kind);
       built.push(await buildVariant(v));
     }
-    // No tone matching: each variant keeps its source colours (world-space regions in
-    // material.wgsl keep equal-toned variants together, so this does not look patchy).
+    // Hue and detail stay the source's; only an outlier's overall brightness is pulled in.
+    const lum = built.map(meanLuminance);
+    const centre = Math.exp(lum.reduce((a, l) => a + Math.log(Math.max(l, 1e-4)), 0) / lum.length);
+    lum.forEach((l, i) => {
+      const clamped = Math.min(Math.max(l, centre * (1 - VARIANT_TONE_RANGE)), centre * (1 + VARIANT_TONE_RANGE));
+      gains[i] = clamped / Math.max(l, 1e-4);
+      if (Math.abs(gains[i]! - 1) > 1e-3) scaleLinear(built[i]!, gains[i]!);
+    });
     built.forEach((layer, i) => layers.push({ material, variant: i, source: labels[i]!, data: encode(layer) }));
-    console.log(`  ${material}: ${labels.join(', ')}`);
+    if (spec.world) {
+      materials[material]!.worldFirstLayer = worldLayers.length;
+      for (const [i, v] of spec.variants.entries()) {
+        if (v.kind !== 'ambientcg') throw new Error(`${material}: world-space layers need ambientCG sources`);
+        const layer = await loadAmbientCg(v, WORLD_SPAN);
+        if (Math.abs(gains[i]! - 1) > 1e-3) scaleLinear(layer, gains[i]!);
+        worldLayers.push({ material, variant: i, source: v.id, data: encode(layer) });
+      }
+    }
+    const tones = lum.map((l, i) => `${l.toFixed(3)}${Math.abs(gains[i]! - 1) > 1e-3 ? `→${(l * gains[i]!).toFixed(3)}` : ''}`);
+    console.log(`  ${material}: ${labels.join(', ')}  [albedo ${tones.join(', ')}]`);
   }
 
   mkdirSync(OUT, { recursive: true });

@@ -260,13 +260,16 @@ export const config = {
     /** Distance LOD (blocks): beyond it hex tiling (3× texture lookups) is off — the 2 m
      *  repeat is sub-pixel there anyway. */
     hexMaxDistance: 32,
-    /** Soft variant region borders: blend band (fraction of one variant's share of the
-     *  region noise, 0 = hard borders) and irregularity of the border line. */
-    variantBlend: 0.03,
-    variantEdgeNoise: 0.03,
+    /** Variant borders (between variants of the SAME block type only): blend band (fraction
+     *  of one variant's share of the region noise; ~0.1 m wide at 0.006, 0 = hard) and
+     *  high-frequency irregularity of the border line. */
+    variantBlend: 0.006,
+    variantEdgeNoise: 0.05,
     /** Variant borders blend by the texture height maps (pebble tops first); the height
      *  range over which both variants show (0 = linear blend). */
-    heightBlendDepth: 0.2,
+    heightBlendDepth: 0.06,
+    /** Variant regions are this many times flatter than wide: strata and veins, not blobs. */
+    variantStrata: 3,
     /** Macro variation of natural materials: tone shifts over `macroScale` metres (dark ↔
      *  light, warm ↔ cool), strength 0 = off. */
     macroScale: 24,

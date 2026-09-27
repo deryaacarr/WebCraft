@@ -49,7 +49,8 @@ struct MaterialParams {
   hex_max_distance: f32,
   moss_max_distance: f32,
   height_blend_depth: f32,
-  _pad3: f32,
+  /// Vertical compression of variant regions (strata).
+  variant_strata: f32,
   _pad4: f32,
 };
 
@@ -164,12 +165,16 @@ fn regionVariant(cell: vec3i, material: u32, count: u32) -> u32 {
 
 /// Region noise value in [0, 1) at a world position (continuous: region borders can run
 /// through blocks), with a fine irregularity on the border line. See regionVariant.
+/// Regions are stretched horizontally (strata, `variant_strata` × taller than wide) and
+/// warped, so equal variants form layers and veins rather than round blobs; the border
+/// line gets high-frequency irregularity (~1 m and ~0.3 m) so it reads as a crack or vein.
 fn regionValue(pos: vec3f, material: u32) -> f32 {
-  let p = pos / material_params.variant_scale + f32(material) * 17.31;
-  let warp = fastNoise(p * 0.5 + 31.7) - 0.5;
-  let q = p + vec3f(0.8, 0.5, -0.6) * (warp * 2.0 * material_params.variant_warp);
-  var n = fastNoise(q) * 0.7 + fastNoise(q * 2.3 + 5.1) * 0.3;
-  n += (fastNoise(pos * 0.6 + 7.7) - 0.5) * 2.0 * material_params.variant_edge_noise;
+  let p = pos / material_params.variant_scale * vec3f(1.0, material_params.variant_strata, 1.0) + f32(material) * 17.31;
+  let warp = vec2f(fastNoise(p * 0.5 + 31.7), fastNoise(p * 0.5 + 3.9)) - 0.5;
+  let q = p + vec3f(warp.x, warp.y * 0.3, -warp.x) * (2.0 * material_params.variant_warp);
+  var n = fastNoise(q) * 0.75 + fastNoise(q * 2.3 + 5.1) * 0.25;
+  let jag = (fastNoise(pos * 1.1 + 7.7) - 0.5) + (fastNoise(pos * 3.3 + 2.1) - 0.5) * 0.5;
+  n += jag * material_params.variant_edge_noise;
   return clamp((n - 0.5) * 2.2 + 0.5, 0.0, 0.9999);
 }
 

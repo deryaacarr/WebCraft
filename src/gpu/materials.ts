@@ -177,7 +177,7 @@ export class MaterialSystem {
     u32[10] = d.worldTextures && this.worldArrays[0]!.width > 1 ? 1 : 0;
     f32.set([d.hexDensity, d.hexContrast, d.variantBlend, d.variantEdgeNoise, d.macroScale, d.macroStrength, d.slopeStrength, d.moss, d.foliageStrength, d.foliageScale], 11);
     f32.set([...d.macroWarm, ...d.macroCool, ...d.dustTint, ...d.mossColor, ...d.foliageDry, ...d.foliageLush], 21);
-    f32.set([d.hexMaxDistance, d.mossMaxDistance, d.heightBlendDepth], 39);
+    f32.set([d.hexMaxDistance, d.mossMaxDistance, d.heightBlendDepth, d.variantStrata], 39);
     this.device.queue.writeBuffer(this.params, 0, this.paramData);
   }
 

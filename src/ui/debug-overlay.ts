@@ -425,9 +425,10 @@ export class DebugOverlay {
     f.add(d, 'hexDensity', 0, 4, 0.1).name('anti-tiling hex cells (0 = off)');
     f.add(d, 'hexContrast', 1, 16, 0.5).name('anti-tiling blend contrast');
     f.add(d, 'hexMaxDistance', 0, 256, 1).name('anti-tiling LOD distance');
-    f.add(d, 'variantBlend', 0, 0.5, 0.01).name('variant border blend (0 = hard)');
+    f.add(d, 'variantBlend', 0, 0.1, 0.001).name('variant border blend (0 = hard)');
     f.add(d, 'variantEdgeNoise', 0, 0.3, 0.01).name('variant border irregularity');
-    f.add(d, 'heightBlendDepth', 0, 1, 0.02).name('variant border height blend');
+    f.add(d, 'heightBlendDepth', 0, 1, 0.01).name('variant border height blend');
+    f.add(d, 'variantStrata', 1, 8, 0.5).name('variant strata (flatness)');
     f.add(d, 'macroStrength', 0, 1, 0.05).name('macro variation');
     f.add(d, 'macroScale', 5, 100, 1).name('macro scale (m)');
     f.add(d, 'slopeStrength', 0, 1, 0.05).name('slope: dusty flats / bare steeps');
