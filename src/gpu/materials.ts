@@ -46,8 +46,10 @@ const CATEGORY_FLAGS: Partial<Record<MaterialName, number>> = {
   oak_log_side: FLAG_MOIST,
   oak_log_top: FLAG_MOIST,
 };
-// MaterialParams in material.wgsl: 44 scalars (colours as three scalars each).
-const PARAMS_SIZE = 176;
+// MaterialParams in material.wgsl: 52 scalars (colours as three scalars each).
+const PARAMS_SIZE = 208;
+/** Blocks without soft edges (material-detail.wgsl applyBevel): grass keeps a crisp mat. */
+const NO_BEVEL = new Set(['grass']);
 const TEXTURE_BASE = `${import.meta.env.BASE_URL}textures/`;
 
 /** Layer data for all materials at one resolution: [kind][layer][texel RGBA8]. */
@@ -94,7 +96,11 @@ export class MaterialSystem {
   constructor(private readonly device: GPUDevice) {
     this.params = device.createBuffer({ label: 'material-params', size: PARAMS_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const faces = new Uint32Array(BLOCKS.length * 4);
-    BLOCKS.forEach((b, i) => faces.set([b.materials.top, b.materials.side, b.materials.bottom, 0], i * 4));
+    // w = 1: light / view passes (air-like for worn-edge exposure; not bevelled itself).
+    // w: bit 0 = see-through (soft edges treat it like air), bit 1 = no soft edge.
+    BLOCKS.forEach((b, i) =>
+      faces.set([b.materials.top, b.materials.side, b.materials.bottom, (b.transparent || !b.solid ? 1 : 0) | (NO_BEVEL.has(b.name) ? 2 : 0)], i * 4),
+    );
     this.blockTable = device.createBuffer({ label: 'block-faces', size: faces.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.blockTable, 0, faces);
     const size = NOISE_TEXELS;
@@ -178,6 +184,9 @@ export class MaterialSystem {
     f32.set([d.hexDensity, d.hexContrast, d.variantBlend, d.variantEdgeNoise, d.macroScale, d.macroStrength, d.slopeStrength, d.moss, d.foliageStrength, d.foliageScale], 11);
     f32.set([...d.macroWarm, ...d.macroCool, ...d.dustTint, ...d.mossColor, ...d.foliageDry, ...d.foliageLush], 21);
     f32.set([d.hexMaxDistance, d.mossMaxDistance, d.heightBlendDepth, d.variantStrata], 39);
+    f32.set([d.bevelWidth, d.bevelVariation, d.chipMarks, d.edgeTint, d.bevelMaxDistance], 43);
+    f32.set([d.bevelRoughness, d.bevelNoise], 48);
+    u32[50] = (d.bevel ? 1 : 0) | (d.bevelSkipGrass ? 2 : 0);
     this.device.queue.writeBuffer(this.params, 0, this.paramData);
   }
 

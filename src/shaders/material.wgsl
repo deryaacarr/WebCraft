@@ -51,7 +51,19 @@ struct MaterialParams {
   height_blend_depth: f32,
   /// Vertical compression of variant regions (strata).
   variant_strata: f32,
-  _pad4: f32,
+  /// Worn edges (material-detail.wgsl applyBevel): mean radius, radius variation, chip
+  /// marks, edge tint.
+  bevel_width: f32,
+  bevel_jag: f32,
+  bevel_chips: f32,
+  edge_wear: f32,
+  bevel_max_distance: f32,
+  /// Soft edge: roughness added in the band, normal jitter, on/off.
+  bevel_roughness: f32,
+  bevel_noise: f32,
+  /// Bit 0 on, bit 1 skip grass (block_faces w bit 1).
+  bevel_enabled: u32,
+  _pad8: f32,
 };
 
 /// Per material: first texture layer, number of variants, flags.
@@ -77,7 +89,8 @@ const F0_METAL: f32 = 230.0 / 255.0;
 
 @group(2) @binding(0) var<uniform> material_params: MaterialParams;
 @group(2) @binding(1) var<storage, read> materials: array<MaterialInfo>;
-/// Per block id: face material indices (top, side, bottom, unused).
+/// Per block id: face material indices (top, side, bottom); w bit 0 = light and view pass
+/// (air, water, glass, leaves, torch), bit 1 = no soft edge (grass).
 @group(2) @binding(2) var<storage, read> block_faces: array<vec4u>;
 @group(2) @binding(3) var tex_albedo: texture_2d_array<f32>;
 @group(2) @binding(4) var tex_normal: texture_2d_array<f32>;

@@ -95,3 +95,115 @@ fn applyDetail(s: ptr<function, Surface>, material: u32, flags: u32, cell: vec3i
     (*s).albedo = a * mix(vec3f(1.0), tint, p.foliage_strength * green);
   }
 }
+
+// ------------------------------------------------------------------ worn edges
+// Worn edges (applied in the lighting pass; shading normal, albedo and roughness only —
+// no geometry, no gloss):
+//   - soft edge: near an exposed edge of the hit face (the block across it lets light and
+//     view through) the normal leans towards the side face. The radius varies irregularly
+//     along the edge (two noise octaves at ~0.3 m and ~0.1 m, clipped at 0): nearly sharp
+//     in places, worn to ~2× the mean elsewhere (`bevel_width` = mean, `bevel_variation`).
+//     The lean is jittered by ~2 cm noise so the edge looks rough, never like a cylinder.
+//   - colour: exposed outer edges slightly lighter and dusty; inside corners (the face
+//     meets a wall: the block across the edge and the one diagonally beyond are solid)
+//     slightly darker — dust and grime (`edge_tint`).
+//   - chip marks: sparse small dark, rough spots along exposed edges (`chip_marks`).
+//   - roughness in the band only goes up (`bevel_roughness`). Grass is skipped.
+// Edges whose neighbour is solid and flush (the surface continues) stay as they are.
+
+/// Whether block `id` lets light and view through (air counts).
+fn seeThrough(id: u32) -> bool {
+  return id == 0u || (block_faces[id].w & 1u) != 0u;
+}
+
+/// Blocks that never get a soft edge (grass: its top edge is a grass mat).
+fn noBevel(id: u32) -> bool {
+  return (block_faces[id].w & 2u) != 0u;
+}
+
+/// Colour / chip band along edges (blocks).
+const EDGE_BAND: f32 = 0.05;
+
+fn applyBevel(s: ptr<function, Surface>, flags: u32, cell: vec3i, face: u32, local: vec3f, t: f32) {
+  let p = material_params;
+  // Alpha-tested foliage is never touched; skip it before any lookup.
+  if ((p.bevel_enabled & 1u) == 0u || t > p.bevel_max_distance || (flags & MATERIAL_ALPHA_TEST) != 0u) {
+    return;
+  }
+  let frame = faceFrame(face);
+  let axes = array<vec3f, 2>(abs(frame.t), abs(frame.b));
+  let ca = dot(local, axes[0]);
+  let cb = dot(local, axes[1]);
+  let nearest = min(min(ca, 1.0 - ca), min(cb, 1.0 - cb));
+  let widest = max(p.bevel_width * (1.0 + 1.5 * p.bevel_jag), EDGE_BAND);
+  if (nearest >= widest) {
+    return;
+  }
+  let pos = vec3f(cell) + local;
+  // Irregular radius along the edge: clipped two-octave noise, mean ≈ bevel_width.
+  let n = fastNoise(pos * 3.0 + 41.0) * 0.7 + fastNoise(pos * 9.0 + 7.0) * 0.3;
+  let width = p.bevel_width * max(1.0 + p.bevel_jag * (n - 0.5) * 5.0, 0.0);
+  var tilt = vec3f(0.0);
+  var wear = 0.0;   // outer edge proximity (0..1)
+  var grime = 0.0;  // inside corner proximity (0..1)
+  var checked_self = false;
+  for (var a = 0; a < 2; a++) {
+    let ax = axes[a];
+    let c = dot(local, ax);
+    for (var side = 0; side < 2; side++) {
+      let d = select(c, 1.0 - c, side == 1);
+      if (d >= widest) {
+        continue;
+      }
+      let e = vec3i(ax * select(-1.0, 1.0, side == 1));
+      if (!checked_self) {
+        let own = getVoxel(cell);
+        if (seeThrough(own) || ((p.bevel_enabled & 2u) != 0u && noBevel(own))) {
+          return;
+        }
+        checked_self = true;
+      }
+      if (seeThrough(getVoxel(cell + e))) {
+        // Exposed outer edge.
+        let band = max(width, 1e-4);
+        if (d < band) {
+          let k = 1.0 - d / band;
+          tilt += vec3f(e) * tan(0.785398 * k * k);
+        }
+        wear = max(wear, 1.0 - d / EDGE_BAND);
+      } else if (!seeThrough(getVoxel(cell + e + vec3i(round(frame.n))))) {
+        // Inside corner: this face meets a wall.
+        grime = max(grime, 1.0 - d / EDGE_BAND);
+      }
+    }
+  }
+  if (wear <= 0.0 && grime <= 0.0) {
+    return;
+  }
+  let q = pos * 48.0;
+  if (any(tilt != vec3f(0.0))) {
+    if (p.bevel_noise > 0.0) {
+      // Rough edge: jitter the lean and its direction with ~2 cm noise.
+      // Two lookups: both jitter components and the lean scale come from them.
+      let j = vec2f(fastNoise(q), fastNoise(q + 5.3)) - 0.5;
+      let jitter = vec3f(j.x, j.y, j.x - j.y);
+      tilt = tilt * (1.0 + p.bevel_noise * (j.x + j.y)) + jitter * (2.0 * p.bevel_noise * length(tilt));
+    }
+    (*s).normal = normalize((*s).normal + tilt);
+  }
+  // Colour: dusty, lighter outer edges; darker inside corners. Never glossier.
+  let dust = wear * wear * (0.6 + 0.4 * fastNoise(pos * 6.0 + 3.0));
+  (*s).albedo *= (1.0 + p.edge_wear * dust) * (1.0 - p.edge_wear * 1.5 * grime * grime);
+  (*s).roughness = min((*s).roughness + p.bevel_roughness * max(wear, grime), 1.0);
+  if (p.bevel_chips > 0.0 && wear > 0.4) {
+    // Chip marks: sparse small spots along exposed edges — darker, rougher, bumpier.
+    let chip = smoothstep(0.72, 0.8, fastNoise(pos * 22.0 + 13.0)) * smoothstep(0.4, 0.8, wear);
+    if (chip > 0.0) {
+      (*s).albedo *= 1.0 - 0.45 * p.bevel_chips * chip;
+      (*s).roughness = min((*s).roughness + 0.3 * chip, 1.0);
+      let b = fastNoise(q + 23.0) - 0.5;
+      let bump = vec3f(b, -b, b * 0.5);
+      (*s).normal = normalize((*s).normal + bump * (1.2 * p.bevel_chips * chip));
+    }
+  }
+}

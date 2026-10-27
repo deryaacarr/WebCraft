@@ -275,6 +275,22 @@ export const config = {
     heightBlendDepth: 0.06,
     /** Variant regions are this many times flatter than wide: strata and veins, not blobs. */
     variantStrata: 3,
+    /** Worn edges (material-detail.wgsl applyBevel; shading only, no geometry, no gloss):
+     *  a soft edge of mean radius `bevelWidth` (blocks) varying irregularly along the edge
+     *  (`bevelVariation`: 0 = constant, 1 = from sharp to ~2× the mean), roughened by
+     *  normal jitter (`bevelNoise`) and extra roughness; exposed edges lighter and dusty,
+     *  inside corners darker (`edgeTint`); sparse chip marks (`chipMarks`). Not on grass.
+     *  `bevel` = on/off. */
+    bevel: true,
+    bevelSkipGrass: true,
+    bevelWidth: 0.03,
+    bevelVariation: 1,
+    bevelNoise: 0.6,
+    bevelRoughness: 0.15,
+    edgeTint: 0.08,
+    chipMarks: 0.5,
+    /** Soft edges only within this distance (blocks): beyond they are sub-pixel. */
+    bevelMaxDistance: 32,
     /** Macro variation of natural materials: tone shifts over `macroScale` metres (dark ↔
      *  light, warm ↔ cool), strength 0 = off. */
     macroScale: 24,

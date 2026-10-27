@@ -8,6 +8,9 @@
 #include "sky.wgsl"
 #include "color.wgsl"
 #include "gi-common.wgsl"
+// Worn edges (applyBevel) are shaded here rather than in the primary pass: in the
+// traversal shader the extra code cost ~0.5 ms through register pressure alone.
+#include "material.wgsl"
 
 struct LightingParams {
   /// 0 lit, 1 shadow (sun visibility), 2 sky visibility, 3 history length, 4 indirect
@@ -219,11 +222,23 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   }
 
   let albedo_ao = unpack4x8unorm(g.x);
-  let albedo = albedo_ao.xyz;
-  let ao = albedo_ao.w;
-  let n = octDecode(unpack2x16snorm(g.y));
   let surf = unpack4x8unorm(g.z); // roughness, metalness, emission, subsurface
-  let roughness = max(surf.x, MIN_ROUGHNESS);
+  let ao = albedo_ao.w;
+  // Worn edges: the hit block and the position inside it from the G-buffer depth (a hair
+  // inside the face, so the cell is the hit block's).
+  var worn: Surface;
+  worn.albedo = albedo_ao.xyz;
+  worn.normal = octDecode(unpack2x16snorm(g.y));
+  worn.roughness = surf.x;
+  let face_id = gbFace(g.w);
+  let depth = textureLoad(gdepth, px, 0).x;
+  let rel = cam.origin_frac + viewRelativePosition(view, cam.forward, depth) - faceNormal(face_id) * 1e-3;
+  let cell_rel = vec3i(floor(rel));
+  let dist = depth / max(dot(view, cam.forward), 1e-4);
+  applyBevel(&worn, materials[gbMaterial(g.w)].flags, cam.origin_cell + cell_rel, face_id, rel - vec3f(cell_rel), dist);
+  let albedo = worn.albedo;
+  let n = worn.normal;
+  let roughness = max(worn.roughness, MIN_ROUGHNESS);
   let metal = surf.y;
   let a2 = roughness * roughness * roughness * roughness;
 

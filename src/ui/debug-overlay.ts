@@ -431,6 +431,15 @@ export class DebugOverlay {
     f.add(d, 'variantEdgeNoise', 0, 0.3, 0.01).name('variant border irregularity');
     f.add(d, 'heightBlendDepth', 0, 1, 0.01).name('variant border height blend');
     f.add(d, 'variantStrata', 1, 8, 0.5).name('variant strata (flatness)');
+    f.add(d, 'bevel').name('worn edges');
+    f.add(d, 'bevelSkipGrass').name('worn edges: skip grass');
+    f.add(d, 'bevelWidth', 0, 0.1, 0.005).name('edge radius, mean (blocks)');
+    f.add(d, 'bevelVariation', 0, 1, 0.05).name('edge radius variation');
+    f.add(d, 'edgeTint', 0, 0.3, 0.01).name('edge colour (dusty / grime)');
+    f.add(d, 'chipMarks', 0, 1, 0.05).name('chip marks');
+    f.add(d, 'bevelNoise', 0, 1, 0.05).name('edge roughness (normal jitter)');
+    f.add(d, 'bevelRoughness', 0, 0.5, 0.01).name('edge extra roughness');
+    f.add(d, 'bevelMaxDistance', 0, 256, 1).name('worn edges LOD distance');
     f.add(d, 'macroStrength', 0, 1, 0.05).name('macro variation');
     f.add(d, 'macroScale', 5, 100, 1).name('macro scale (m)');
     f.add(d, 'slopeStrength', 0, 1, 0.05).name('slope: dusty flats / bare steeps');

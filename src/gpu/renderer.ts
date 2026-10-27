@@ -71,7 +71,7 @@ export class Renderer {
     // Last frame's lit image, for GI screen reuse (the lighting pass runs after GI).
     const gi = new GiPass(device, this.gbuffer, camera, brickmap, materials, sky, emitters, () => this.lighting?.output ?? null);
     const aerial = new AerialPerspectivePass(device, camera, sky);
-    const lighting = new LightingPass(device, this.gbuffer, camera, visibility, sky, aerial, gi);
+    const lighting = new LightingPass(device, this.gbuffer, camera, visibility, sky, aerial, gi, brickmap, materials);
     this.visibility = visibility;
     this.lighting = lighting;
     this.gi = gi;

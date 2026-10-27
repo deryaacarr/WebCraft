@@ -13,6 +13,7 @@
  *        exposure / accumulation, then saves OUT/name.png (1440×800).
  * bench: per variant restores the config, applies the patch, and prints the minimum over
  *        RUNS (5) of Renderer.benchmarkFrame(ITER = 30) — ms per stage.
+ * PRE (shots): JS expression evaluated after each load, before the wait.
  * Env: PORT (5199), SETTLE (ms before measuring, 15000), TIMEOUT (ms, 900000).
  */
 import { spawn } from 'node:child_process';
@@ -106,6 +107,8 @@ if (mode === 'shots') {
       return [k, JSON.parse(v)];
     });
     if (entries.length) await evaluate(patchExpr(entries));
+    // PRE: a JS expression run after load (e.g. building a test scene with world.setBlock).
+    if (env.PRE) console.log('pre', await evaluate(env.PRE));
     await sleep(Number(env.WAIT ?? 10000));
     const shot = (await send('Page.captureScreenshot', { format: 'png' })).result.data;
     writeFileSync(join(out, `${name}.png`), Buffer.from(shot, 'base64'));

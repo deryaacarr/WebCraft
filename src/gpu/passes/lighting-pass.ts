@@ -1,5 +1,8 @@
 import { config } from '../../config';
+import type { GpuBrickmap } from '../brickmap';
 import type { GBuffer } from '../gbuffer';
+import type { MaterialSystem } from '../materials';
+import { traceConstants } from '../trace-constants';
 import { createShaderModule } from '../shader';
 import type { SkySystem } from '../sky';
 import { SCENE_FORMAT } from './gradient-pass';
@@ -21,6 +24,8 @@ export class LightingPass implements RenderPass {
 
   private pipeline!: GPUComputePipeline;
   private skyLayout!: GPUBindGroupLayout;
+  private brickLayout!: GPUBindGroupLayout;
+  private materialLayout!: GPUBindGroupLayout;
   private readonly params: GPUBuffer;
   /** Bind groups per set of GI textures (they alternate with the frame parity). */
   private readonly groups = new Map<string, GPUBindGroup>();
@@ -36,6 +41,9 @@ export class LightingPass implements RenderPass {
     private readonly sky: SkySystem,
     private readonly aerial: AerialPerspectivePass,
     private readonly gi: GiPass,
+    /** Worn edges look up neighbouring blocks and material flags. */
+    private readonly brickmap: GpuBrickmap,
+    private readonly materials: MaterialSystem,
   ) {
     aerial.onVolumeChange = () => {
       this.groups.clear();
@@ -60,9 +68,11 @@ export class LightingPass implements RenderPass {
     this.pipeline = await this.device.createComputePipelineAsync({
       label: this.name,
       layout: 'auto',
-      compute: { module, entryPoint: 'main', constants: { WORKGROUP_X: wx, WORKGROUP_Y: wy } },
+      compute: { module, entryPoint: 'main', constants: { WORKGROUP_X: wx, WORKGROUP_Y: wy, ...traceConstants() } },
     });
     this.skyLayout = this.pipeline.getBindGroupLayout(3);
+    this.brickLayout = this.pipeline.getBindGroupLayout(1);
+    this.materialLayout = this.pipeline.getBindGroupLayout(2);
   }
 
   resize(width: number, height: number): void {
@@ -128,6 +138,9 @@ export class LightingPass implements RenderPass {
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, group);
     pass.setBindGroup(3, this.sky.bindGroup(this.skyLayout));
+    pass.setBindGroup(1, this.brickmap.bindGroup(this.brickLayout, [0, 1, 2]));
+    // Worn edges: params, material table, block table, noise volume, sampler.
+    pass.setBindGroup(2, this.materials.bindGroup(this.materialLayout, [0, 1, 2, 6, 10]));
     pass.dispatchWorkgroups(Math.ceil(this.output.width / this.workgroup[0]), Math.ceil(this.output.height / this.workgroup[1]));
     pass.end();
   }
