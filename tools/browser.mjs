@@ -44,6 +44,16 @@ setTimeout(() => {
   console.log('TIMEOUT');
   finish(1);
 }, Number(env.TIMEOUT ?? 900000));
+// Any crash must still close Chrome: a leaked headless instance keeps rendering the game
+// and skews every later measurement (it doubled frame times once).
+process.on('uncaughtException', (e) => {
+  console.log('[tool error]', e?.stack ?? e);
+  finish(1);
+});
+process.on('unhandledRejection', (e) => {
+  console.log('[tool error]', e?.stack ?? e);
+  finish(1);
+});
 
 let ws;
 for (let i = 0; i < 100 && !ws; i++) {

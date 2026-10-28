@@ -59,7 +59,7 @@ describe('FixedStepClock', () => {
 });
 
 describe('FramePacer', () => {
-  const cfg = { enabled: true, maxFps: 30, idleFps: 10, idleAfterSeconds: 3 };
+  const cfg = { enabled: true, maxFps: 30, idleFps: 10, liveIdleFps: 30, idleAfterSeconds: 3 };
   const never = () => false;
   /** Display refreshes at `hz` from `from` ms for the span to `to`; how many ran. */
   const runs = (pacer: FramePacer, from: number, to: number, hz = 60) => {
@@ -92,6 +92,17 @@ describe('FramePacer', () => {
     expect(runs(pacer, 4000, 6000)).toBe(0);
     pacer.markActive(6010);
     expect(pacer.shouldRun(6016)).toBe(true);
+  });
+
+  it('keeps the live rate when idle while animated content is on screen', () => {
+    let live = true;
+    const pacer = new FramePacer(() => ({ ...cfg, idleFps: 0 }), never, () => live);
+    pacer.markActive(0);
+    runs(pacer, 0, 3000);
+    expect(pacer.targetFps(3500)).toBe(30);
+    expect(runs(pacer, 4000, 5000)).toBe(30);
+    live = false; // the animation left the screen: back to the idle policy (stopped)
+    expect(pacer.targetFps(5000)).toBe(-1);
   });
 
   it('wakes from idle on the very next refresh', () => {

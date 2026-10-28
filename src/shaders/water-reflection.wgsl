@@ -64,6 +64,8 @@ const SCREEN_DEPTH_TOLERANCE: f32 = 0.02;
 /// block): 4 bytes per pixel, so blocks without water are skipped cheaply.
 @group(0) @binding(11) var primary_flags: texture_2d<u32>;
 
+/// Lowest upward component of a reflection ray (see main).
+const MIN_REFLECTION_Y: f32 = 0.01;
 /// GGX lobe of the sun's highlight: beyond this fraction of its peak it is not drawn (the
 /// sun is so bright that the tail stays visible far out: 1e-4 clipped it to a small oval).
 const GLINT_CUTOFF: f32 = 1e-8;
@@ -149,7 +151,11 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let view = rayDir(cam.inv_view_proj, uv);
   let n_s = waterSurfaceNormal(w);
   let surface = cam.origin_frac + view * w.x + n_s * SURFACE_OFFSET;
-  let dir = reflect(view, n_s);
+  // Mirrored about a wavy normal, a grazing ray can point down into the water: it would
+  // meet the next wave; it is kept just above the horizon instead (walking under water to
+  // the ray's end cost up to ~1 ms in peaks, with the wave phase).
+  let mirrored = reflect(view, n_s);
+  let dir = normalize(vec3f(mirrored.x, max(mirrored.y, MIN_REFLECTION_Y), mirrored.z));
   cone_start = w.x;
   // GGX D(n·h) / D(1) = (α² / ((n·h)²(α² − 1) + 1))².
   let h = normalize(sky.light_dir - view);

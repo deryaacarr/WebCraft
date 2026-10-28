@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { config } from '../config';
 import { BlockId } from '../world/blocks';
-import { waterCoefficients } from './water';
+import { waterCoefficients, waterTraceDistance } from './water';
 
 describe('water', () => {
   it('WATER_ID in water.wgsl is BlockId.water', () => {
@@ -23,5 +23,16 @@ describe('water', () => {
     expect(at(0)).toBeCloseTo(config.water.maxScattering);
     expect(at(1)).toBeCloseTo(config.water.minScattering);
     expect(at(0.5)).toBeLessThan(at(0.2));
+  });
+
+  it('stops refracted rays where the clearest channel keeps 1 % of the light', () => {
+    const w = config.water;
+    const { absorption, scattering } = waterCoefficients(w);
+    const d = waterTraceDistance(w);
+    expect(d).toBeLessThanOrEqual(w.maxDistance);
+    const left = Math.max(...absorption.map((a, i) => Math.exp(-(a + scattering[i]!) * d)));
+    expect(d < w.maxDistance ? left : 0.01).toBeCloseTo(0.01, 4);
+    // Murky water: shorter.
+    expect(waterTraceDistance({ ...w, clarity: 0 })).toBeLessThan(d);
   });
 });

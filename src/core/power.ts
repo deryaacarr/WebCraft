@@ -25,3 +25,20 @@ export async function withoutPowerSaving<T>(fn: () => Promise<T>): Promise<T> {
     if (suspended === 0) for (const l of listeners) l();
   }
 }
+
+/**
+ * Animated content on screen (water waves now; rain, plants in the wind later): while any
+ * source reports some, the idle frame rate is `config.power.liveIdleFps` instead of
+ * `idleFps`, so the animation keeps running smoothly with the camera still. Sources report
+ * by name and clear their own flag.
+ */
+const live = new Set<string>();
+
+export function setLiveContent(source: string, on: boolean): void {
+  if (on) live.add(source);
+  else live.delete(source);
+}
+
+export function hasLiveContent(): boolean {
+  return live.size > 0;
+}

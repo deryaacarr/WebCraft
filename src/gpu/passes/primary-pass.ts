@@ -13,6 +13,8 @@ const CAMERA_SIZE = 288;
 const DEG = Math.PI / 180;
 /** u32 words before the tile marks in the tile list buffer (primary.wgsl TILE_HEADER). */
 const TILE_HEADER = 4;
+/** Frames between read-backs of "water seen" (idle frame rate policy). */
+const WATER_SEEN_INTERVAL = 10;
 
 /**
  * Traces one ray per pixel through the brickmap and fills the G-buffer. A depth prepass
@@ -28,9 +30,23 @@ export class PrimaryPass implements RenderPass {
   private fixupBindGroup: GPUBindGroup | null = null;
   private fixupLayouts: [GPUBindGroupLayout, GPUBindGroupLayout] | null = null;
   private flags: GPUTexture | null = null;
+  /** Water surface under the waves (primary.wgsl `surface`, read by the fix-up). */
+  private waterSurface: GPUTexture | null = null;
+  private surfacePipeline!: GPUComputePipeline;
+  private surfaceGroup: GPUBindGroup | null = null;
+  /** Its brickmap and material layouts, looked up once (getBindGroupLayout() returns a new
+   *  object per call, which would grow the bind group caches keyed by layout). */
+  private surfaceLayouts!: [GPUBindGroupLayout, GPUBindGroupLayout];
   /** Tiles with flagged pixels (primary.wgsl micro_tiles): indirect args, marks, list. */
   private tiles: GPUBuffer | null = null;
   private tileCount = 0;
+  /** Water seen (tile list word 3), copied for reading back every few frames. */
+  private readonly waterSeen: GPUBuffer;
+  /** 'copied': recorded in a frame, to map after its submit; 'mapping': read in flight. */
+  private waterSeenState: 'idle' | 'copied' | 'mapping' = 'idle';
+  private waterSeenFrame = 0;
+  /** Whether water was on screen when last read back (a few frames late). */
+  waterVisible = false;
   /** Stand-in for the tile binding a pipeline does not use. */
   private readonly dummyTiles: GPUBuffer;
   private prepassPipeline!: GPUComputePipeline;
@@ -53,6 +69,7 @@ export class PrimaryPass implements RenderPass {
     private readonly water: WaterSystem,
   ) {
     this.dummyTiles = device.createBuffer({ label: `${this.name}-micro-tiles-dummy`, size: 16, usage: GPUBufferUsage.STORAGE });
+    this.waterSeen = device.createBuffer({ label: `${this.name}-water-seen`, size: 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
   }
 
   async init(): Promise<void> {
@@ -63,18 +80,24 @@ export class PrimaryPass implements RenderPass {
     const [wx, wy] = this.workgroup;
     const constants = { WORKGROUP_X: wx, WORKGROUP_Y: wy, ...traceConstants() };
     let pipelines;
-    [pipelines, this.prepassPipeline] = await Promise.all([
+    [pipelines, this.prepassPipeline, this.surfacePipeline] = await Promise.all([
       createMicroPipelines(this.device, this.name, module, constants, true),
       this.device.createComputePipelineAsync({
         label: `${this.name}-prepass`,
         layout: 'auto',
         compute: { module: prepassModule, entryPoint: 'main', constants },
       }),
+      this.device.createComputePipelineAsync({
+        label: `${this.name}-water-surface`,
+        layout: 'auto',
+        compute: { module, entryPoint: 'surface', constants: { ...constants, MICRO_WALK: 1 } },
+      }),
     ]);
     this.pipeline = pipelines.main;
     this.fixup = pipelines.fixup;
     this.fixupLayouts = this.fixup && [this.fixup.getBindGroupLayout(1), this.fixup.getBindGroupLayout(2)];
     this.prepassLayout = this.prepassPipeline.getBindGroupLayout(1);
+    this.surfaceLayouts = [this.surfacePipeline.getBindGroupLayout(1), this.surfacePipeline.getBindGroupLayout(2)];
     this.brickmapLayout = this.pipeline.getBindGroupLayout(1);
     this.camera = this.device.createBuffer({
       label: `${this.name}-camera`,
@@ -106,13 +129,21 @@ export class PrimaryPass implements RenderPass {
     });
     this.flags?.destroy();
     this.flags = createMicroFlags(this.device, this.name, width, height);
+    this.waterSurface?.destroy();
+    this.waterSurface = this.device.createTexture({
+      label: `${this.name}-water-surface`,
+      size: { width, height },
+      format: 'rg32uint',
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+    });
     const [wx, wy] = this.workgroup;
     this.tileCount = Math.ceil(width / wx) * Math.ceil(height / wy);
     this.tiles?.destroy();
     this.tiles = this.device.createBuffer({
       label: `${this.name}-micro-tiles`,
       size: (TILE_HEADER + 2 * this.tileCount) * 4,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+      // COPY_SRC: the "water seen" word is read back.
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
     // Indirect args y = z = 1 (x, the listed tile count, is cleared every frame).
     this.device.queue.writeBuffer(this.tiles, 4, new Uint32Array([1, 1]));
@@ -133,10 +164,46 @@ export class PrimaryPass implements RenderPass {
           { binding: 8, resource: { buffer: tilesRead } },
           { binding: 9, resource: g.water!.createView() },
           { binding: 10, resource: { buffer: this.water.params } },
+          { binding: 12, resource: this.waterSurface!.createView() },
         ],
       });
     this.bindGroup = entries(this.pipeline, this.flags.createView(), dummy, this.tiles, this.dummyTiles);
     this.fixupBindGroup = this.fixup && entries(this.fixup, dummy, this.flags.createView(), this.dummyTiles, this.tiles);
+    this.surfaceGroup = this.device.createBindGroup({
+      label: this.surfacePipeline.label,
+      layout: this.surfacePipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.camera } },
+        { binding: 6, resource: this.flags.createView() },
+        { binding: 8, resource: { buffer: this.tiles } },
+        { binding: 10, resource: { buffer: this.water.params } },
+        { binding: 11, resource: this.waterSurface.createView() },
+      ],
+    });
+  }
+
+  /** Every few frames: copies the "water seen" word (read back in afterSubmit). */
+  private readWaterSeen(encoder: GPUCommandEncoder): void {
+    if (!this.tiles || this.waterSeenState !== 'idle' || ++this.waterSeenFrame < WATER_SEEN_INTERVAL) return;
+    this.waterSeenFrame = 0;
+    encoder.copyBufferToBuffer(this.tiles, 12, this.waterSeen, 0, 4);
+    this.waterSeenState = 'copied';
+  }
+
+  /** After the frame's submit: maps the copied word (no stall; result a few frames late). */
+  afterSubmit(): void {
+    if (this.waterSeenState !== 'copied') return;
+    this.waterSeenState = 'mapping';
+    this.waterSeen.mapAsync(GPUMapMode.READ).then(
+      () => {
+        this.waterVisible = new Uint32Array(this.waterSeen.getMappedRange())[0] !== 0;
+        this.waterSeen.unmap();
+        this.waterSeenState = 'idle';
+      },
+      () => {
+        this.waterSeenState = 'idle';
+      },
+    );
   }
 
   /** Pixels whose ray stopped at water or a shaped block (r32uint, non-zero), this frame. */
@@ -179,13 +246,14 @@ export class PrimaryPass implements RenderPass {
     f32.set(cam.prevForward, 68);
     u32[71] = cam.frameIndex;
     this.device.queue.writeBuffer(this.camera, 0, this.cameraData);
-    this.water.update();
+    this.water.update(ctx.time);
 
     // Only pixels that hit a shaped block or water write a flag (and a water sample).
     if (this.fixup && this.flags && this.tiles) {
       clearMicroFlags(ctx.encoder, this.flags);
       clearMicroFlags(ctx.encoder, this.gbuffer.water!);
       ctx.encoder.clearBuffer(this.tiles, 0, 4);
+      ctx.encoder.clearBuffer(this.tiles, 12, 4);
       ctx.encoder.clearBuffer(this.tiles, TILE_HEADER * 4, this.tileCount * 4);
     }
     const timestampWrites = ctx.profiler.timestampWrites(this.name);
@@ -203,7 +271,14 @@ export class PrimaryPass implements RenderPass {
     pass.setBindGroup(2, this.materials.bindGroup(this.materialLayout));
     const groups = [Math.ceil(this.gbuffer.width / this.workgroup[0]), Math.ceil(this.gbuffer.height / this.workgroup[1])] as const;
     pass.dispatchWorkgroups(...groups);
-    if (this.fixup && this.fixupBindGroup && this.fixupLayouts && this.tiles) {
+    if (this.fixup && this.fixupBindGroup && this.fixupLayouts && this.tiles && this.surfaceGroup) {
+      // Water surface under the waves first (same tiles), then the fix-up.
+      pass.setPipeline(this.surfacePipeline);
+      pass.setBindGroup(0, this.surfaceGroup);
+      // getVoxel: params, grid, pool. Ripples: material params, sampler, noise volume.
+      pass.setBindGroup(1, this.brickmap.bindGroup(this.surfaceLayouts[0], [0, 1, 2]));
+      pass.setBindGroup(2, this.materials.bindGroup(this.surfaceLayouts[1], [0, 6, 10]));
+      pass.dispatchWorkgroupsIndirect(this.tiles, 0);
       // One workgroup per listed tile; unflagged pixels in it return after one texel load.
       pass.setPipeline(this.fixup);
       pass.setBindGroup(0, this.fixupBindGroup);
@@ -212,5 +287,6 @@ export class PrimaryPass implements RenderPass {
       pass.dispatchWorkgroupsIndirect(this.tiles, 0);
     }
     pass.end();
+    this.readWaterSeen(ctx.encoder);
   }
 }

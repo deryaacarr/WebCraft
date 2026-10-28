@@ -158,6 +158,7 @@ export class DebugOverlay {
     sim.add(config.power, 'enabled').name('energy saving');
     sim.add(config.power, 'maxFps', { '30': 30, '60': 60, unlimited: 0 }).name('FPS limit');
     sim.add(config.power, 'idleFps', 0, 30, 1).name('idle FPS (0 = stop)');
+    sim.add(config.power, 'liveIdleFps', 0, 60, 1).name('idle FPS with animation');
     sim.add(config.power, 'idleAfterSeconds', 0.5, 10, 0.5).name('idle after (s)');
     sim.add(config.power, 'pauseHidden').name('pause when tab hidden');
     sim.add(config.power, 'pauseUnfocused').name('pause when window unfocused');
@@ -471,6 +472,12 @@ export class DebugOverlay {
     f.add(w, 'reflectionScreenReuse').name('reflection: reuse lit screen');
     f.add(w, 'reflectionHistory', 1, 16, 1).name('reflection accumulation (frames)');
     f.add(w, 'sunRoughness', 0.01, 0.3, 0.005).name('sun highlight roughness');
+    f.add(w, 'waveStrength', 0, 4, 0.05).name('wave strength');
+    f.add(config.wind, 'directionDeg', 0, 360, 1).name('wind direction (°)');
+    f.add(config.wind, 'speed', 0, 15, 0.1).name('wind speed (m/s)');
+    f.add(w, 'wavelength', 0.2, 8, 0.1).name('longest wavelength (m)');
+    f.add(w, 'ripples', 0, 3, 0.05).name('ripples');
+    f.add(w, 'level', 0.5, 1, 0.01).name('water level in block');
     f.close();
   }
 

@@ -1,5 +1,5 @@
 import { config, type DebugView } from '../config';
-import { withoutPowerSaving } from '../core/power';
+import { setLiveContent, withoutPowerSaving } from '../core/power';
 import type { CameraFrame, FlyCamera } from '../player/camera';
 import type { GpuBrickmap } from './brickmap';
 import type { MaterialSystem } from './materials';
@@ -143,6 +143,10 @@ export class Renderer {
 
     device.queue.submit([encoder.finish()]);
     this.profiler.afterSubmit();
+    this.primary.afterSubmit();
+    // Moving water keeps the idle frame rate up (core/power.ts).
+    const w = config.water;
+    setLiveContent('water', this.primary.waterVisible && w.enabled && w.waveStrength > 0 && config.wind.speed > 0);
   }
 
   /**
@@ -226,7 +230,8 @@ export class Renderer {
       },
     };
     const encoder = device.createCommandEncoder({ label: 'benchmark-primary' });
-    const ctx: FrameContext = { encoder, profiler, time: 0, dt: 0, camera };
+    // The last frame's time: animated content (water waves) is measured as it was shown.
+    const ctx: FrameContext = { encoder, profiler, time: this.lastTime ?? 0, dt: 0, camera };
     for (let i = 0; i < iterations; i++) for (const pass of passes) pass.execute(ctx);
 
     let resolve: GPUBuffer | null = null;

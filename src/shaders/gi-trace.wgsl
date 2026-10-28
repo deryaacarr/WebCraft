@@ -20,7 +20,8 @@
 //
 // Pixels seen through water (water.wgsl) start at the true bottom position and their rays
 // pass through water (no refraction; the lighting pass applies the absorption). Rays from
-// above the water still stop at its surface (as before).
+// above the water still stop at its surface (as before), except from points inside a
+// water voxel (see under_water).
 #include "trace.wgsl"
 #include "gi-common.wgsl"
 #include "material.wgsl"
@@ -50,7 +51,10 @@
 @group(0) @binding(16) var<uniform> water: WaterParams;
 /// Set when any ray of the pixel stopped at a shaped block.
 var<private> hit_shaped: bool;
-/// The pixel is seen through water: its rays pass through water.
+/// The pixel's rays pass through water: it is seen through water, or it starts inside a
+/// water voxel — the strip of a shore block exposed in the air above the surface (level
+/// < 1); its rays stopping at the water voxel they start in left that strip black. Decided
+/// once per pixel: a per-voxel test in traceOpaque cost ~0.1–0.7 ms.
 var<private> under_water: bool;
 
 override WORKGROUP_X: u32 = 8u;
@@ -227,9 +231,10 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let n_geo = faceNormal(gbFace(g.z));
   let n = guideNormal(g);
   let w = textureLoad(gwater, vec2i(q), 0);
-  under_water = throughWater(w);
-  let pos = select(viewRelativePosition(view, cam.forward, guideDepth(g)), waterBottom(view, w, water.ior), under_water);
+  let seen_through = throughWater(w);
+  let pos = select(viewRelativePosition(view, cam.forward, guideDepth(g)), waterBottom(view, w, water.ior), seen_through);
   let start = cam.origin_frac + pos + n_geo * SURFACE_OFFSET;
+  under_water = seen_through || getVoxel(cam.origin_cell + vec3i(floor(start))) == WATER_ID;
 
   let noise0 = blueNoise(blue_noise, p, cam.frame_index, 0u);
   let noise1 = blueNoise(blue_noise, p, cam.frame_index, 1u);

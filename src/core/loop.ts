@@ -1,5 +1,5 @@
 import { config } from '../config';
-import { onPowerSavingResume, powerSavingSuspended } from './power';
+import { hasLiveContent, onPowerSavingResume, powerSavingSuspended } from './power';
 
 export interface LoopCallbacks {
   /** Advances the simulation by exactly `dt` seconds. */
@@ -49,8 +49,9 @@ export class FramePacer {
   private lastActive = -Infinity;
 
   constructor(
-    private readonly getConfig: () => { enabled: boolean; maxFps: number; idleFps: number; idleAfterSeconds: number } = () => config.power,
+    private readonly getConfig: () => { enabled: boolean; maxFps: number; idleFps: number; liveIdleFps: number; idleAfterSeconds: number } = () => config.power,
     private readonly suspended: () => boolean = powerSavingSuspended,
+    private readonly live: () => boolean = hasLiveContent,
   ) {}
 
   /** Something changed (input, camera motion, world): full rate, starting with the next
@@ -64,13 +65,15 @@ export class FramePacer {
     return now - this.lastActive > this.getConfig().idleAfterSeconds * 1000;
   }
 
-  /** Target frame rate at `now`: 0 = uncapped, −1 = stopped (idle with idleFps 0). */
+  /** Target frame rate at `now`: 0 = uncapped, −1 = stopped (idle with idleFps 0). Idle
+   *  with animated content on screen (power.ts setLiveContent): liveIdleFps. */
   targetFps(now: number): number {
     const c = this.getConfig();
     if (!c.enabled || this.suspended()) return 0;
     if (!this.isIdle(now)) return c.maxFps;
-    if (c.idleFps <= 0) return -1;
-    return c.maxFps > 0 ? Math.min(c.idleFps, c.maxFps) : c.idleFps;
+    const idle = this.live() ? c.liveIdleFps : c.idleFps;
+    if (idle <= 0) return -1;
+    return c.maxFps > 0 ? Math.min(idle, c.maxFps) : idle;
   }
 
   /** Whether to run a frame for the display refresh at `now`. */

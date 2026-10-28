@@ -46,6 +46,9 @@ export const config = {
      *  accumulation has settled by then), run at this rate; 0 = stop rendering until
      *  something moves. Motion or input resumes full rate at once. */
     idleFps: 10,
+    /** Idle rate while animated content is on screen (water waves; later rain, plants in
+     *  the wind — core/power.ts setLiveContent): the animation stays smooth. */
+    liveIdleFps: 30,
     idleAfterSeconds: 1.5,
     /** Stop the loop while the tab is hidden / the window is not focused. */
     pauseHidden: true,
@@ -475,6 +478,21 @@ export const config = {
     /** Roughness of the sun's highlight on the water (micro-ripples; the reflection rays
      *  themselves are mirror rays). */
     sunRoughness: 0.04,
+    /** Waves (water-waves.wgsl), driven by `wind`: swell height `waveHeight` (metres) at a
+     *  2 m/s wind, growing with the wind speed squared, × `waveStrength` (0 = flat);
+     *  longest wavelength (metres); ripple strength; rest level of the surface inside the
+     *  top water voxel. */
+    waveStrength: 1,
+    waveHeight: 0.001,
+    wavelength: 1.6,
+    ripples: 0.5,
+    level: 0.9,
+  },
+  /** Global wind: water waves now; rain and foliage later. Direction it blows towards
+   *  (degrees, 0 = north / −Z, 90 = east / +X), speed in m/s (≈ 2: calm lake). */
+  wind: {
+    directionDeg: 60,
+    speed: 2,
   },
   /** Global illumination: half-resolution path tracing (1 bounce), ReSTIR DI for emissive
    *  blocks, SVGF denoising. Replaces the approximate sky-ambient term when enabled. */

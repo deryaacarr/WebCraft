@@ -39,6 +39,17 @@ struct WaterParams {
   /// Roughness of the sun's highlight on the surface (micro-ripples).
   sun_roughness: f32,
   _pad: f32,
+  /// Waves (water-waves.wgsl): unit direction they travel with the wind (xz), swell height
+  /// scale (metres), seconds.
+  wind_dir: vec2f,
+  wave_amplitude: f32,
+  time: f32,
+  /// Longest swell wavelength (metres), ripple strength, rest level of the surface inside
+  /// the top water voxel (0..1).
+  wavelength: f32,
+  ripple: f32,
+  level: f32,
+  _pad2: f32,
 };
 
 fn waterMeanScattering(w: WaterParams) -> f32 {
