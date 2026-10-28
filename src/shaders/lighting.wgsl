@@ -75,6 +75,9 @@ const KM_PER_UNIT: f32 = 0.001;
 @group(0) @binding(11) var<storage, read> block_radiance: array<vec4f>;
 @group(0) @binding(12) var gwater: texture_2d<f32>;
 @group(0) @binding(13) var<uniform> water: WaterParams;
+/// Ray-traced water reflections at reduced resolution (water-reflection.wgsl): rgb
+/// radiance (pre-exposed), a = sun visibility at the surface, a < 0 = no water there.
+@group(0) @binding(14) var water_reflection: texture_2d<f32>;
 
 /// Mean path length of diffuse (sky and bounce) light per metre of depth under water: it
 /// arrives within Snell's window, mostly steeply.
@@ -191,11 +194,36 @@ fn waterInscatter(sigma_t: vec3f, k: f32, path: f32) -> vec3f {
   return (1.0 - exp(-a * path)) / max(a, vec3f(1e-6));
 }
 
+/// Upsampled water reflection at full-res pixel `px`: bilinear over the reduced-resolution
+/// texels around it that lie on water; a < 0 if none does.
+fn waterReflection(px: vec2i) -> vec4f {
+  let size = vec2i(textureDimensions(water_reflection));
+  let scale = f32(cam.size.x) / f32(size.x);
+  let c = (vec2f(px) + 0.5) / scale - 0.5;
+  let base = vec2i(floor(c));
+  let fr = c - vec2f(base);
+  var sum = vec4f(0.0);
+  var wsum = 0.0;
+  for (var k = 0; k < 4; k++) {
+    let o = vec2i(k & 1, k >> 1);
+    let v = textureLoad(water_reflection, clamp(base + o, vec2i(0), size - 1), 0);
+    if (v.a < 0.0) {
+      continue;
+    }
+    let w = select(1.0 - fr.x, fr.x, o.x == 1) * select(1.0 - fr.y, fr.y, o.y == 1) + 1e-3;
+    sum += v * w;
+    wsum += w;
+  }
+  return select(vec4f(0.0, 0.0, 0.0, -1.0), sum / wsum, wsum > 0.0);
+}
+
 /// Water over the pre-exposed radiance `bottom` leaving the bottom (zero for deep water):
-/// Fresnel-weighted reflection and transmission, Beer-Lambert absorption along the view path
-/// and single scattering (isotropic phase) of the refracted sun (`sun_vis`: shadowed) and
-/// the sky light under the surface, both attenuated with depth.
-fn waterComposite(view: vec3f, w: vec4f, bottom: vec3f, sun_vis: f32) -> vec3f {
+/// Fresnel-weighted reflection (traced, upsampled; the sun's highlight analytically, GGX of
+/// roughness sun_roughness, shadowed by the reflection pass's sun visibility at the
+/// surface) and transmission, Beer-Lambert absorption along the view path and single
+/// scattering (isotropic phase) of the refracted sun (`sun_vis`: shadowed at the bottom)
+/// and the sky light under the surface, both attenuated with depth.
+fn waterComposite(px: vec2i, view: vec3f, w: vec4f, bottom: vec3f, sun_vis: f32) -> vec3f {
   let n_s = waterSurfaceNormal(w);
   let f_v = fresnelDielectric(dot(-view, n_s), water.ior);
   let d = refract(view, n_s, 1.0 / water.ior);
@@ -207,16 +235,31 @@ fn waterComposite(view: vec3f, w: vec4f, bottom: vec3f, sun_vis: f32) -> vec3f {
   let cos_l = dot(sky.light_dir, n_s);
   if (cos_l > 0.0) {
     let mu_l = max(dot(waterLightDir(sky.light_dir, n_s, water.ior), n_s), 1e-3);
-    let e_sun = lighting.light_illuminance * (1.0 - fresnelDielectric(cos_l, water.ior)) * sun_vis;
+    // Perpendicular irradiance of the refracted beam (narrower: × cos θ_air / cos θ_water).
+    let e_sun = lighting.light_illuminance * (1.0 - fresnelDielectric(cos_l, water.ior)) * cos_l / mu_l * sun_vis;
     scatter += e_sun * waterInscatter(sigma_t, mu_v / mu_l, path);
   }
   // Diffuse light: scalar irradiance ≈ planar irradiance × the mean path factor.
   let e_sky = lighting.sky_irradiance * (1.0 - WATER_SKY_FRESNEL) * WATER_DIFFUSE_PATH;
   scatter += e_sky * waterInscatter(sigma_t, mu_v * WATER_DIFFUSE_PATH, path);
   let transmitted = bottom * exp(-sigma_t * path) + water.scattering * water.scatter_albedo / (4.0 * PI) * scatter * preExposure();
-  // Reflection: the sky for now.
-  let reflected = skyRadiance(reflect(view, n_s));
-  return mix(transmitted, reflected, f_v);
+  let traced = waterReflection(px);
+  var reflected = traced.rgb;
+  if (traced.a < 0.0) {
+    // No traced texel nearby (thin water at the reduced resolution): the sky.
+    reflected = skyScattering(reflect(view, n_s)) * preExposure();
+  }
+  var glint = vec3f(0.0);
+  if (cos_l > 0.0) {
+    let v = -view;
+    let h = normalize(v + sky.light_dir);
+    let a = water.sun_roughness * water.sun_roughness;
+    let a2 = a * a;
+    let n_v = max(dot(n_s, v), 1e-4);
+    let spec = fresnelDielectric(dot(v, h), water.ior) * ggxD(max(dot(n_s, h), 0.0), a2) * smithV(cos_l, n_v, a2);
+    glint = spec * lighting.light_illuminance * cos_l * select(1.0, traced.a, traced.a >= 0.0) * preExposure();
+  }
+  return mix(transmitted, reflected, f_v) + glint;
 }
 
 fn ggxD(n_h: f32, a2: f32) -> f32 {
@@ -316,7 +359,11 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
       let depth_below = max(view.y * wsample.x - pos.y, 0.0);
       let cos_l = dot(sky.light_dir, n_s);
       l = waterLightDir(sky.light_dir, n_s, water.ior);
-      att_direct = (1.0 - fresnelDielectric(cos_l, water.ior)) * exp(-sigma_t * depth_below / max(dot(l, n_s), 1e-3));
+      // The beam narrows as it bends towards the normal: its perpendicular irradiance grows by
+    // cos θ_air / cos θ_water (the flux through the surface is E · cos θ_air). Lighting the
+    // bottom with the refracted cosine alone made it ~4× too bright under a low sun.
+    let mu_w = max(dot(l, n_s), 1e-3);
+    att_direct = (1.0 - fresnelDielectric(cos_l, water.ior)) * max(cos_l, 0.0) / mu_w * exp(-sigma_t * depth_below / mu_w);
       att_indirect = (1.0 - WATER_SKY_FRESNEL) * exp(-sigma_t * depth_below * WATER_DIFFUSE_PATH);
     }
     let h = normalize(v + l);
@@ -384,7 +431,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     sun_vis = vis.x;
   }
   if (under && params.mode == 0u) {
-    result = waterComposite(view, wsample, result, sun_vis);
+    result = waterComposite(px, view, wsample, result, sun_vis);
   }
   if (params.aerial_enabled != 0u) {
     let air_depth = select(textureLoad(gdepth, px, 0).x, wsample.x * dot(view, cam.forward), under);

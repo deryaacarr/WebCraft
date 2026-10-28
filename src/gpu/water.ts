@@ -28,6 +28,7 @@ export class WaterSystem {
     const f32 = new Float32Array(this.data);
     f32.set([...absorption, w.ior, ...scattering, w.maxDistance, ...w.scatterColor, w.shadowBlur, w.detailBlur], 0);
     new Uint32Array(this.data)[13] = w.enabled ? 1 : 0;
+    f32[14] = w.sunRoughness;
     this.device.queue.writeBuffer(this.params, 0, this.data);
   }
 }

@@ -437,9 +437,10 @@ export const config = {
     enabled: true,
     ior: 1.333,
     /** Colour of light after `absorptionDistance` metres of water (Beer-Lambert absorption,
-     *  linear rgb): red goes first, so shallow water is clear / turquoise and deep water
-     *  blue-green to dark blue. */
-    absorptionColor: [0.3, 0.79, 0.87] as [number, number, number],
+     *  linear rgb): red goes first, so shallow water is clear with a light turquoise tint
+     *  and deep water blue-green to dark blue. (Pure water's 650 nm value, (0.3, …) at
+     *  4 m, turned sand under 1 m of water mint green: the red channel spans 580–700 nm.) */
+    absorptionColor: [0.55, 0.85, 0.9] as [number, number, number],
     absorptionDistance: 4,
     /** 1 = clear, 0 = murky: scattering per metre from `maxScattering` (murky) down to
      *  `minScattering` (clear). Default: a clear mountain lake — the bottom sharp at 1–2 m,
@@ -449,15 +450,31 @@ export const config = {
     maxScattering: 1.2,
     /** The water's own colour: share of scattered light the particles do not absorb
      *  (linear rgb; blue-green). */
-    scatterColor: [0.2, 0.8, 0.6] as [number, number, number],
+    scatterColor: [0.4, 0.75, 0.7] as [number, number, number],
     /** Refracted rays stop after this many metres in water (deep water beyond). */
     maxDistance: 48,
     /** Softer shadows on the bottom of turbid water: light reaching depth d came through
-     *  the surface within a disk of radius shadowBlur · scattering · d² (metres). */
-    shadowBlur: 0.5,
+     *  the surface within a disk of radius shadowBlur · scattering · d² (metres). Small in
+     *  a clear lake: 0.5 gave wide penumbras that stayed grainy (one jittered sample per
+     *  pixel and frame). */
+    shadowBlur: 0.15,
     /** The bottom's detail blurs with the path through water: texture footprint grows by
      *  detailBlur · scattering · path² (metres). */
     detailBlur: 0.05,
+    /** Ray-traced reflections (water-reflection.wgsl) at 1/reflectionScale resolution.
+     *  `reflectionScreenReuse`: hits visible on screen take last frame's lit image. Off by
+     *  default: one reflected object then mixed two shadings (lit image with GI where it is
+     *  on screen, sun + sky without GI elsewhere) — a bright streak on a dark reflected
+     *  trunk, and grain along reflected leaf edges. */
+    reflectionScale: 2,
+    reflectionDistance: 512,
+    reflectionMaxSteps: 256,
+    reflectionScreenReuse: false,
+    /** Accumulation over frames (exponential, ~this many frames; 1 = none). */
+    reflectionHistory: 6,
+    /** Roughness of the sun's highlight on the water (micro-ripples; the reflection rays
+     *  themselves are mirror rays). */
+    sunRoughness: 0.04,
   },
   /** Global illumination: half-resolution path tracing (1 bounce), ReSTIR DI for emissive
    *  blocks, SVGF denoising. Replaces the approximate sky-ambient term when enabled. */

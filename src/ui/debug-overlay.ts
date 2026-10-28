@@ -60,7 +60,7 @@ export interface DebugOverlayHooks {
   /** Compares the G-buffer rendered with and without the depth prepass. */
   onVerifyPrepass(): Promise<{ pixels: number; mismatches: number; first?: string }>;
   /** Frame cost by stage (ms): primary, visibility, GI trace, GI denoise, other. */
-  onBenchmarkFrame(): Promise<Record<'primary' | 'visibility' | 'giTrace' | 'giDenoise' | 'other', number | null>>;
+  onBenchmarkFrame(): Promise<Record<'primary' | 'visibility' | 'giTrace' | 'giDenoise' | 'water' | 'other', number | null>>;
   /** Places test torches around the camera; returns how many. */
   onPlaceTorches(): number;
   onPlaceRocks(): number;
@@ -409,7 +409,7 @@ export class DebugOverlay {
           (t) => {
             const ms = (x: number | null) => (x === null ? 'n/a' : x.toFixed(2));
             const total = Object.values(t).reduce<number>((a, b) => a + (b ?? 0), 0);
-            v.frame = `primary ${ms(t.primary)} | vis ${ms(t.visibility)} | GI ${ms(t.giTrace)} | denoise ${ms(t.giDenoise)} | other ${ms(t.other)} | total ${total.toFixed(2)}`;
+            v.frame = `primary ${ms(t.primary)} | vis ${ms(t.visibility)} | GI ${ms(t.giTrace)} | denoise ${ms(t.giDenoise)} | water ${ms(t.water)} | other ${ms(t.other)} | total ${total.toFixed(2)}`;
           },
           (err: unknown) => {
             v.frame = `error: ${err instanceof Error ? err.message : String(err)}`;
@@ -466,6 +466,11 @@ export class DebugOverlay {
     f.add(w, 'detailBlur', 0, 0.5, 0.01).name('bottom detail blur');
     f.add(w, 'ior', 1, 1.5, 0.001).name('index of refraction');
     f.add(w, 'maxDistance', 4, 128, 1).name('max path in water (m)');
+    f.add(w, 'reflectionScale', [1, 2, 3, 4]).name('reflection resolution divisor');
+    f.add(w, 'reflectionDistance', 16, 1024, 16).name('reflection ray length (m)');
+    f.add(w, 'reflectionScreenReuse').name('reflection: reuse lit screen');
+    f.add(w, 'reflectionHistory', 1, 16, 1).name('reflection accumulation (frames)');
+    f.add(w, 'sunRoughness', 0.01, 0.3, 0.005).name('sun highlight roughness');
     f.close();
   }
 

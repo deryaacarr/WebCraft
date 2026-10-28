@@ -157,7 +157,9 @@ fn screenRadiance(rel: vec3f) -> vec4f {
   }
   let x = vec2i(uv * vec2f(params.full_size));
   let depth = dot(rel, cam.forward);
-  if (abs(textureLoad(gdepth, x, 0).x - depth) > SCREEN_DEPTH_TOLERANCE * depth) {
+  // Pixels seen through water show the water's composite (reflection, scattering), not the
+  // surface there: reusing it as bounce light fed the water's colour back into itself.
+  if (abs(textureLoad(gdepth, x, 0).x - depth) > SCREEN_DEPTH_TOLERANCE * depth || throughWater(textureLoad(gwater, x, 0))) {
     return vec4f(0.0);
   }
   let prev_uv = uv - textureLoad(gmotion, x, 0).xy;

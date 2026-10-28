@@ -198,6 +198,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   var l = basis(sky.light_dir) * vec3f(sin_t * cos(phi), sin_t * sin(phi), cos_t);
   var dir = l;
   var dist = params.shadow_distance;
+  /// Whether the face looks towards the light (the unjittered direction it arrives from).
+  var facing = dot(n, l) > 0.0;
   if (under) {
     // Under water: up along the refracted light direction to the surface, then (second
     // segment) on towards the light in air. Scattering in the water spreads where the light
@@ -214,11 +216,17 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let to_exit = exit + jitter - start;
     dist = length(to_exit);
     dir = select(l_w, to_exit / max(dist, 1e-6), dist > 1e-6);
-    if (dot(l_w, n_s) <= 0.0) {
-      dir = vec3f(0.0); // the light is below the horizon
+    // The jitter only spreads occlusion: whether the face is lit at all is decided by the
+    // refracted light direction (testing the jittered one let faces turned away from the
+    // light catch ~half the samples: grey noise on the sides of underwater steps). A
+    // jittered ray dipping below the face takes the light direction instead.
+    facing = dot(l_w, n_s) > 0.0 && dot(n, l_w) > 0.0;
+    if (dot(n, dir) <= 0.0) {
+      dir = l_w;
+      dist = up / max(dot(l_w, n_s), 1e-3);
     }
   }
-  if (dot(n, dir) > 0.0) {
+  if (facing) {
     sky_ray = 0u;
     var origin = start;
     // A dynamic segment count, so the loop (and the traversal in it) is not unrolled.

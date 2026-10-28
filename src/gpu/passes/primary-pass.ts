@@ -139,6 +139,11 @@ export class PrimaryPass implements RenderPass {
     this.fixupBindGroup = this.fixup && entries(this.fixup, dummy, this.flags.createView(), this.dummyTiles, this.tiles);
   }
 
+  /** Pixels whose ray stopped at water or a shaped block (r32uint, non-zero), this frame. */
+  get fixupFlags(): GPUTexture | null {
+    return this.flags;
+  }
+
   execute(ctx: FrameContext): void {
     this.encode(ctx, config.trace.prepass);
   }

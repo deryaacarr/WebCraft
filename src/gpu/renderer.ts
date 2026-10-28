@@ -9,6 +9,7 @@ import { ExposurePass } from './passes/exposure-pass';
 import { GiPass } from './passes/gi-pass';
 import { LightingPass } from './passes/lighting-pass';
 import { VisibilityPass } from './passes/visibility-pass';
+import { WaterReflectionPass } from './passes/water-reflection-pass';
 import type { SkySystem } from './sky';
 import { CanvasSize } from './canvas-size';
 import type { GpuContext } from './device';
@@ -44,6 +45,7 @@ export class Renderer {
   private readonly visibility: VisibilityPass;
   private readonly gi: GiPass;
   private readonly aerial: AerialPerspectivePass;
+  private readonly reflection: WaterReflectionPass;
   private readonly exposure: ExposurePass;
   private lastTime: number | null = null;
   private readonly allPasses: RenderPass[];
@@ -73,7 +75,9 @@ export class Renderer {
     // Last frame's lit image, for GI screen reuse (the lighting pass runs after GI).
     const gi = new GiPass(device, this.gbuffer, camera, brickmap, materials, sky, emitters, () => this.lighting?.output ?? null, water);
     const aerial = new AerialPerspectivePass(device, camera, sky);
-    const lighting = new LightingPass(device, this.gbuffer, camera, visibility, sky, aerial, gi, brickmap, materials, water);
+    const reflection = new WaterReflectionPass(device, this.gbuffer, camera, brickmap, materials, sky, water, () => primary.fixupFlags, () => gi.emitterRadiance, () => this.lighting?.output ?? null);
+    this.reflection = reflection;
+    const lighting = new LightingPass(device, this.gbuffer, camera, visibility, sky, aerial, gi, brickmap, materials, water, reflection);
     this.visibility = visibility;
     this.lighting = lighting;
     this.gi = gi;
@@ -85,14 +89,14 @@ export class Renderer {
     const gradient = new GradientPass(device);
     const out = (p: { output: GPUTexture | null }) => () => p.output;
     this.chains = {
-      lit: { passes: [primary, visibility, gi, aerial, lighting, exposure], output: out(lighting), tonemap: true, sky: true },
-      visibility: { passes: [primary, visibility, gi, aerial, lighting], output: out(lighting), tonemap: false, sky: true },
+      lit: { passes: [primary, visibility, gi, reflection, aerial, lighting, exposure], output: out(lighting), tonemap: true, sky: true },
+      visibility: { passes: [primary, visibility, gi, reflection, aerial, lighting], output: out(lighting), tonemap: false, sky: true },
       gbuffer: { passes: [primary, view], output: out(view), tonemap: false, sky: false },
       topdown: { passes: [topdown], output: out(topdown), tonemap: false, sky: false },
       gradient: { passes: [gradient], output: out(gradient), tonemap: false, sky: false },
     };
     // Resize order matters: the G-buffer consumers after the passes they read from.
-    this.allPasses = [primary, visibility, gi, aerial, lighting, exposure, view, topdown, gradient];
+    this.allPasses = [primary, visibility, gi, reflection, aerial, lighting, exposure, view, topdown, gradient];
     this.blit = new BlitPass(device, gpu.context, gpu.format, sky.exposure);
   }
 
@@ -169,10 +173,10 @@ export class Renderer {
 
   /**
    * Frame cost by stage (each timed back to back on its own, same camera as the last
-   * frame): primary, visibility, GI tracing (ReSTIR + paths), GI denoising and the rest
-   * (aerial perspective, shading, exposure). Sky LUTs and the blit are not included.
+   * frame): primary, visibility, GI tracing (ReSTIR + paths), GI denoising, water
+   * reflections and the rest (aerial perspective, shading, exposure). Sky LUTs and the blit are not included.
    */
-  async benchmarkFrame(iterations: number): Promise<Record<'primary' | 'visibility' | 'giTrace' | 'giDenoise' | 'other', number | null>> {
+  async benchmarkFrame(iterations: number): Promise<Record<'primary' | 'visibility' | 'giTrace' | 'giDenoise' | 'water' | 'other', number | null>> {
     // Energy saving off while measuring (core/power.ts).
     return withoutPowerSaving(async () => {
       const time = async (passes: RenderPass[]) => (await this.benchmarkPasses(passes, iterations)).gpuMs;
@@ -190,9 +194,10 @@ export class Renderer {
           this.gi.stage = 'all';
         }
       }
+      const water = await time([this.reflection]);
       // Only passes that record work (the timestamps pair the first and last pass).
       const other = await time([...(config.sky.aerialPerspective.enabled ? [this.aerial] : []), this.lighting, this.exposure]);
-      return { primary, visibility, giTrace, giDenoise, other };
+      return { primary, visibility, giTrace, giDenoise, water, other };
     });
   }
 

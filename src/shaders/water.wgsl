@@ -36,8 +36,9 @@ struct WaterParams {
   detail_blur: f32,
   /// 0: water is drawn as an opaque block (the old look).
   enabled: u32,
-  _pad0: f32,
-  _pad1: f32,
+  /// Roughness of the sun's highlight on the surface (micro-ripples).
+  sun_roughness: f32,
+  _pad: f32,
 };
 
 fn waterMeanScattering(w: WaterParams) -> f32 {

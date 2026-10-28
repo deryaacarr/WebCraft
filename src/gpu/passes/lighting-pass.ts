@@ -11,6 +11,7 @@ import type { FrameContext, RenderPass } from './pass';
 import type { AerialPerspectivePass } from './aerial-perspective-pass';
 import type { GiPass } from './gi-pass';
 import type { VisibilityPass } from './visibility-pass';
+import type { WaterReflectionPass } from './water-reflection-pass';
 
 export type LightingMode = 'lit' | 'shadow' | 'skyvis' | 'history' | 'gi';
 const MODES: readonly LightingMode[] = ['lit', 'shadow', 'skyvis', 'history', 'gi'];
@@ -46,8 +47,12 @@ export class LightingPass implements RenderPass {
     private readonly brickmap: GpuBrickmap,
     private readonly materials: MaterialSystem,
     private readonly water: WaterSystem,
+    private readonly reflection: WaterReflectionPass,
   ) {
     aerial.onVolumeChange = () => {
+      this.groups.clear();
+    };
+    reflection.onResize = () => {
       this.groups.clear();
     };
     gi.onResize = () => {
@@ -94,10 +99,10 @@ export class LightingPass implements RenderPass {
     const g = this.gbuffer;
     if (!this.output || !g.gbuffer0 || !g.depth || !g.water) return;
     const vis = this.visibility.output;
-    if (!vis) return;
+    if (!vis || !this.reflection.output) return;
     const giOn = config.gi.enabled;
     const gi = (giOn && this.gi.outputs) || this.noGi;
-    const key = `${vis.label}|${gi.diffuse.label}|${gi.specular.label}|${gi.emissive.label}|${gi.guide.label}`;
+    const key = `${vis.label}|${gi.diffuse.label}|${gi.specular.label}|${gi.emissive.label}|${gi.guide.label}|${this.reflection.output.label}`;
     let group = this.groups.get(key);
     if (!group) {
       group = this.device.createBindGroup({
@@ -118,6 +123,7 @@ export class LightingPass implements RenderPass {
           { binding: 11, resource: { buffer: this.gi.emitterRadiance } },
           { binding: 12, resource: g.water!.createView() },
           { binding: 13, resource: { buffer: this.water.params } },
+          { binding: 14, resource: this.reflection.output.createView() },
         ],
       });
       this.groups.set(key, group);
