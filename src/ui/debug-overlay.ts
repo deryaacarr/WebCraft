@@ -63,6 +63,7 @@ export interface DebugOverlayHooks {
   onBenchmarkFrame(): Promise<Record<'primary' | 'visibility' | 'giTrace' | 'giDenoise' | 'other', number | null>>;
   /** Places test torches around the camera; returns how many. */
   onPlaceTorches(): number;
+  onPlaceRocks(): number;
   /** Emissive blocks in the loaded world. */
   emitterCount(): number;
 }
@@ -398,6 +399,7 @@ export class DebugOverlay {
     f.add(r, 'lightRadius', 8, 256, 1).name('light list radius');
     f.add(v, 'emitters').name('emitters loaded').disable().listen();
     f.add({ place: () => hooks.onPlaceTorches() }, 'place').name('Place test torches');
+    f.add({ place: () => hooks.onPlaceRocks() }, 'place').name('Place test rocks (sub-voxel)');
     f.add(v, 'frame').name('frame (ms)').disable().listen();
     const bench = {
       run: () => {
@@ -431,6 +433,7 @@ export class DebugOverlay {
     f.add(d, 'variantEdgeNoise', 0, 0.3, 0.01).name('variant border irregularity');
     f.add(d, 'heightBlendDepth', 0, 1, 0.01).name('variant border height blend');
     f.add(d, 'variantStrata', 1, 8, 0.5).name('variant strata (flatness)');
+    f.add(d, 'microVoxels').name('sub-voxel shapes (off = cubes)');
     f.add(d, 'bevel').name('worn edges');
     f.add(d, 'bevelSkipGrass').name('worn edges: skip grass');
     f.add(d, 'bevelWidth', 0, 0.1, 0.005).name('edge radius, mean (blocks)');
@@ -510,7 +513,7 @@ export class DebugOverlay {
         v.verify = 'running…';
         hooks.onVerifyTrace().then(
           (r) => {
-            v.verify = `${r.agree}/${r.rays} agree (${r.hits} hits), ${r.ms.toFixed(0)} ms`;
+            v.verify = `${r.agree}/${r.rays} agree (${r.hits} hits, ${r.shapedHits} shaped), ${r.ms.toFixed(0)} ms`;
             (r.agree === r.rays ? console.info : console.warn)('[trace] verify:', r);
           },
           (err: unknown) => {

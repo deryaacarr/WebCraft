@@ -1,5 +1,6 @@
 import { config } from '../config';
 import { toChunkCoord } from '../world/coords';
+import { packShapeTable } from '../world/shapes';
 import type { World, WorldChanges } from '../world/world';
 import { BRICK_STRIDE_BYTES, EMPTY_FLAG } from './brick-pack';
 import { BrickDistanceField, type CellBox } from './brick-distance';
@@ -23,13 +24,18 @@ export class GpuBrickmap implements BrickSink {
   readonly store: BrickStore;
   private readonly grid: GPUBuffer;
   private readonly params: GPUBuffer;
+  /** Sub-voxel shape table (shapes.ts); rewritten when `config.detail.microVoxels` flips. */
+  private readonly shapes: GPUBuffer;
+  private shapesEnabled: boolean | null = null;
   private pool: GPUBuffer | null = null;
   private poolCapacity = 0;
   /** Bumped whenever a buffer is replaced; cached bind groups are rebuilt. */
   private version = 0;
   private readonly bindGroups = new Map<GPUBindGroupLayout, { version: number; group: GPUBindGroup }>();
-  /** Bindings of brickmap.wgsl: 0 params, 1 grid, 2 pool. */
+  /** Bindings of brickmap.wgsl: 0 params, 1 grid, 2 pool (shape table 3 only for tracers). */
   static readonly ALL_BINDINGS = [0, 1, 2] as const;
+  /** Bindings of pipelines that include trace.wgsl. */
+  static readonly TRACE_BINDINGS = [0, 1, 2, 3] as const;
   private readonly paramData = new ArrayBuffer(PARAMS_SIZE);
   private readonly size: BrickGridSize;
   private distance: BrickDistanceField | null = null;
@@ -58,6 +64,9 @@ export class GpuBrickmap implements BrickSink {
       size: PARAMS_SIZE,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
+    const table = packShapeTable(true);
+    this.shapes = device.createBuffer({ label: 'shape-table', size: table.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.syncShapes();
     const u32 = new Uint32Array(this.paramData);
     const i32 = new Int32Array(this.paramData);
     u32[4] = size.x;
@@ -85,10 +94,18 @@ export class GpuBrickmap implements BrickSink {
   /** `changes`: the world's changes since the last sync (taken by the caller when other
    *  consumers need them too). */
   sync(world: World, x: number, z: number, changes: WorldChanges = world.takeChanges()): void {
+    this.syncShapes();
     this.store.setCenter(toChunkCoord(x), toChunkCoord(z), world);
     this.store.applyChanges(changes);
     this.store.process(world, config.brickmap.uploadBudgetMs);
     this.flushDistance();
+  }
+
+  private syncShapes(): void {
+    const enabled = config.detail.microVoxels;
+    if (enabled === this.shapesEnabled) return;
+    this.shapesEnabled = enabled;
+    this.device.queue.writeBuffer(this.shapes, 0, packShapeTable(enabled));
   }
 
   /** Recomputes the distance field for cells written so far (also used by debug tools). */
@@ -106,7 +123,7 @@ export class GpuBrickmap implements BrickSink {
     if (cached && cached.version === this.version) return cached.group;
     const pool = this.pool;
     if (!pool) throw new Error('brick pool not allocated');
-    const buffers = [this.params, this.grid, pool];
+    const buffers = [this.params, this.grid, pool, this.shapes];
     const group = this.device.createBindGroup({
       label: 'brickmap',
       layout,

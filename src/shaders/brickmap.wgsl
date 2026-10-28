@@ -4,6 +4,8 @@
 //   binding 0: BrickmapParams (uniform)
 //   binding 1: grid of brick pointers (toroidal in X/Z)
 //   binding 2: brick pool (8-bit voxels, 4 per u32)
+//   binding 3: sub-voxel shape table (src/world/shapes.ts packShapeTable) — tracers only;
+//              a uniform buffer (GI and visibility already use 8 storage buffers)
 // Pipelines must set the BRICK_BITS override (config.world.brickBits).
 //
 // Pointer encoding (see src/gpu/brick-pack.ts):
@@ -14,6 +16,8 @@
 //   otherwise                  pool slot of a mixed brick
 
 override BRICK_BITS: u32 = 3u;
+/// Bit i = block id i (< 32) has a sub-voxel shape (shapes.ts shapedIdMask).
+override SHAPED_IDS: u32 = 0u;
 
 const BRICK_EMPTY: u32 = 0u;
 const BRICK_UNIFORM_FLAG: u32 = 0x80000000u;
@@ -40,6 +44,19 @@ struct BrickmapParams {
 @group(1) @binding(0) var<uniform> brickmap: BrickmapParams;
 @group(1) @binding(1) var<storage, read> brick_grid: array<u32>;
 @group(1) @binding(2) var<storage, read> brick_pool: array<u32>;
+/// Words 0..255: per block id 0 = full cube, else (first shape << 8) | variant count.
+/// Then 16 words per shape: 8³ occupancy bits, bit (y·64 + z·8 + x).
+@group(1) @binding(3) var<uniform> shape_table: array<vec4u, SHAPE_TABLE_VEC4>;
+
+const MICRO: i32 = 8;
+const SHAPE_HEADER: u32 = 256u;
+const SHAPE_WORDS: u32 = 16u;
+/// shapes.ts SHAPE_TABLE_WORDS / 4 (header + MAX_SHAPES shapes).
+const SHAPE_TABLE_VEC4: u32 = 320u;
+
+fn shapeWord(i: u32) -> u32 {
+  return shape_table[i >> 2u][i & 3u];
+}
 
 fn brickSize() -> i32 {
   return 1 << BRICK_BITS;
@@ -111,4 +128,51 @@ fn brickVoxel(ptr: u32, local: vec3u) -> u32 {
 fn getVoxel(p: vec3i) -> u32 {
   let local = vec3u(p & vec3i(brickSize() - 1));
   return brickVoxel(brickPointer(brickCoord(p)), local);
+}
+
+// ------------------------------------------------------------------ sub-voxel shapes
+
+/// Shape header of block `id` (0 = full cube); the table is read only for shaped ids.
+fn shapeHeader(id: u32) -> u32 {
+  if (id >= 32u || ((SHAPED_IDS >> id) & 1u) == 0u) {
+    return 0u;
+  }
+  return shapeWord(id);
+}
+
+/// Same as shapes.ts `shapeHash`: picks a cell's shape variant and quarter turn.
+fn shapeHash(c: vec3i) -> u32 {
+  var h = (u32(c.x) * 0x9e3779b1u) ^ (u32(c.y) * 0x85ebca77u) ^ (u32(c.z) * 0xc2b2ae3du);
+  h ^= h >> 15u;
+  h *= 0x2c1b3c6du;
+  h ^= h >> 12u;
+  h *= 0x297a2d39u;
+  h ^= h >> 15u;
+  return h;
+}
+
+/// Shape of the block at `cell`: x = first table word of its variant, y = quarter turns.
+fn cellShape(header: u32, cell: vec3i) -> vec2u {
+  let h = shapeHash(cell);
+  let shape = (header >> 8u) + (h & 0xffffu) % (header & 0xffu);
+  return vec2u(SHAPE_HEADER + shape * SHAPE_WORDS, h >> 30u);
+}
+
+/// Micro voxel m (0..7 per axis, cell space) of a shape turned `rot` quarter turns about Y.
+fn microSolid(shape: vec2u, m: vec3i) -> bool {
+  let k = MICRO - 1;
+  var x = m.x;
+  var z = m.z;
+  if (shape.y == 1u) {
+    x = m.z;
+    z = k - m.x;
+  } else if (shape.y == 2u) {
+    x = k - m.x;
+    z = k - m.z;
+  } else if (shape.y == 3u) {
+    x = k - m.z;
+    z = m.x;
+  }
+  let i = u32((m.y * MICRO + z) * MICRO + x);
+  return ((shapeWord(shape.x + (i >> 5u)) >> (i & 31u)) & 1u) != 0u;
 }

@@ -254,6 +254,9 @@ export const config = {
   },
   /** Natural material detail (stage 8.5). Each feature can be toggled in the "Detail" panel. */
   detail: {
+    /** Sub-voxel shapes (src/world/shapes.ts): shaped blocks are traced on an 8³ micro grid
+     *  by every ray (primary, shadow, GI). Off = they render as full cubes (comparison). */
+    microVoxels: true,
     /** Natural materials (stone, dirt, gravel, sand) sample world-space layers covering
      *  2 × 2 m, so walls read as one surface instead of a block grid. */
     worldTextures: true,
@@ -544,6 +547,10 @@ export const config = {
     /** "Place test torches" button / &torches=N: count and radius around the camera. */
     testTorches: 12,
     testTorchRadius: 16,
+    /** "Place test rocks" button / &rocks=N: shaped test blocks (broken stone) on the
+     *  ground around the camera; seeded, so the same pose gets the same rocks. */
+    testRocks: 24,
+    testRockRadius: 8,
     /** Back-to-back primary passes timed by "Benchmark primary". */
     benchmarkIterations: 50,
     /** Key that toggles the debug overlay. */

@@ -11,7 +11,9 @@ import { DEBUG_VIEWS, type DebugView } from '../config';
  *   &time=18.5                   time of day in hours; also pauses the clock
  *   &spin=90&fly=20              scripted camera turn (°/s) and forward flight (blocks/s)
  *   &torches=12                  place test torches around the camera once loaded
+ *   &rocks=12                    place test shaped blocks (broken stone) around the camera once loaded
  *   &gi=0                        global illumination off
+ *   &micro=0                     sub-voxel shapes compiled out (shaped blocks are cubes; benchmarking)
  *   &power=0                     energy saving off (automation, benchmarks)
  */
 export interface UrlOverrides {
@@ -25,7 +27,9 @@ export interface UrlOverrides {
   cameraSpin?: number;
   cameraFly?: number;
   torches?: number;
+  rocks?: number;
   gi?: boolean;
+  micro?: boolean;
   power?: boolean;
 }
 
@@ -57,7 +61,10 @@ export function parseUrlOverrides(search: string): UrlOverrides {
   if (params.has('fly') && Number.isFinite(fly)) out.cameraFly = fly;
   const torches = positiveInt('torches');
   if (torches) out.torches = torches;
+  const rocks = positiveInt('rocks');
+  if (rocks) out.rocks = rocks;
   if (params.has('gi')) out.gi = params.get('gi') !== '0';
+  if (params.has('micro')) out.micro = params.get('micro') !== '0';
   if (params.has('power')) out.power = params.get('power') !== '0';
   const dmax = positiveInt('dmax');
   if (dmax) out.distanceMax = Math.min(dmax, 254);

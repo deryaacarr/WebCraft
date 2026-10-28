@@ -37,6 +37,12 @@
 /// Exposure last frame's image was stored with.
 @group(0) @binding(11) var<storage, read> history_exposure: array<f32>;
 @group(0) @binding(12) var raw_emissive: texture_storage_2d<rgba16float, write>;
+/// Shaped-block fix-up flags (trace.wgsl MICRO_WALK, see primary.wgsl): main pipeline
+/// writes, fix-up reads and redoes the flagged pixels with the same random numbers.
+@group(0) @binding(13) var micro_flag_out: texture_storage_2d<r32uint, write>;
+@group(0) @binding(14) var micro_flag_in: texture_2d<u32>;
+/// Set when any ray of the pixel stopped at a shaped block.
+var<private> hit_shaped: bool;
 
 override WORKGROUP_X: u32 = 8u;
 override WORKGROUP_Y: u32 = 8u;
@@ -62,7 +68,9 @@ fn traceOpaque(id: u32, cell: vec3i, normal: vec3i, local: vec3f, t: f32, dir: v
 
 fn traceFrom(p: vec3f, dir: vec3f, distance: f32, max_steps: u32) -> TraceResult {
   let cell = vec3i(floor(p));
-  return traceRay(cam.origin_cell + cell, p - vec3f(cell), dir, 0.0, distance, max_steps);
+  let r = traceRay(cam.origin_cell + cell, p - vec3f(cell), dir, 0.0, distance, max_steps);
+  hit_shaped = hit_shaped || (r.hit && isShapedId(r.id));
+  return r;
 }
 
 /// 1 if nothing blocks `dir` from `start` within `distance`, else 0 (leaves pass
@@ -185,11 +193,18 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   if (any(p >= params.half_size)) {
     return;
   }
+  if (MICRO_WALK && textureLoad(micro_flag_in, vec2i(p), 0).x == 0u) {
+    return;
+  }
+  hit_shaped = false;
   let g = textureLoad(guide, vec2i(p), 0);
   if (gbIsSky(g.z)) {
     textureStore(raw_diffuse, vec2i(p), vec4f(0.0));
     textureStore(raw_specular, vec2i(p), vec4f(0.0));
     textureStore(raw_emissive, vec2i(p), vec4f(0.0));
+    if (!MICRO_WALK) {
+      textureStore(micro_flag_out, vec2i(p), vec4u(0u));
+    }
     return;
   }
   let q = fullPixel(p, params.full_size, params.scale);
@@ -234,4 +249,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   textureStore(raw_emissive, vec2i(p), vec4f(emissive * exposure, 1.0));
   textureStore(raw_diffuse, vec2i(p), vec4f(clampLuminance(diffuse * exposure, params.firefly_clamp), 1.0));
   textureStore(raw_specular, vec2i(p), vec4f(clampLuminance(specular * exposure, params.firefly_clamp), 1.0));
+  if (!MICRO_WALK) {
+    textureStore(micro_flag_out, vec2i(p), vec4u(select(0u, 1u, hit_shaped), 0u, 0u, 0u));
+  }
 }

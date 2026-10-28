@@ -2,11 +2,12 @@ import { config } from '../../config';
 import { kelvinToLinearRgb } from '../../core/color-temperature';
 import { BLOCKS } from '../../world/blocks';
 import type { EmitterRegistry } from '../../world/emitters';
-import type { GpuBrickmap } from '../brickmap';
+import { GpuBrickmap } from '../brickmap';
 import type { GBuffer } from '../gbuffer';
 import type { MaterialSystem } from '../materials';
 import { createShaderModule } from '../shader';
 import type { SkySystem } from '../sky';
+import { createMicroFlags, createMicroPipelines, microFlagDummy } from '../micro-fixup';
 import { traceConstants } from '../trace-constants';
 import type { FrameContext, RenderPass } from './pass';
 
@@ -37,6 +38,11 @@ export class GiPass implements RenderPass {
   stage: Stage = 'all';
 
   private pipelines!: Record<'prepare' | 'spatial' | 'trace' | 'temporal' | 'variance' | 'atrous', GPUComputePipeline>;
+  /** Shaped-block fix-up of the trace stage (micro-fixup.ts). */
+  private fixup: GPUComputePipeline | null = null;
+  /** getBindGroupLayout() returns a new object per call: looked up once per pipeline/group,
+   *  else the bind group caches keyed by layout grow (and rebuild) every frame. */
+  private readonly layouts = new Map<GPUComputePipeline, GPUBindGroupLayout[]>();
   private readonly params: GPUBuffer;
   private readonly historyExposure: GPUBuffer;
   private readonly blockRadiance: GPUBuffer;
@@ -54,6 +60,8 @@ export class GiPass implements RenderPass {
     rawDiffuse: GPUTexture;
     rawSpecular: GPUTexture;
     rawEmissive: GPUTexture;
+    /** Traced pixels whose rays stopped at a shaped block (micro-fixup.ts). */
+    microFlags: GPUTexture;
     accDiffuse: GPUTexture[];
     accSpecular: GPUTexture[];
     accEmissive: GPUTexture[];
@@ -114,15 +122,16 @@ export class GiPass implements RenderPass {
         layout: 'auto',
         compute: { module, entryPoint, constants: { ...wg, ...(trace && traceConstants()) } },
       });
-    const [prepare, spatial, tracePipeline, temporal, variance, atrous] = await Promise.all([
+    const [prepare, spatial, tracePipelines, temporal, variance, atrous] = await Promise.all([
       make(restir, 'prepare', true),
       make(restir, 'spatial', true),
-      make(trace, 'main', true),
+      createMicroPipelines(this.device, 'gi-main', trace, { ...wg, ...traceConstants() }),
       make(denoise, 'temporal'),
       make(denoise, 'variance'),
       make(denoise, 'atrousStep'),
     ]);
-    this.pipelines = { prepare, spatial, trace: tracePipeline, temporal, variance, atrous };
+    this.pipelines = { prepare, spatial, trace: tracePipelines.main, temporal, variance, atrous };
+    this.fixup = tracePipelines.fixup;
     void this.loadBlueNoise();
   }
 
@@ -167,6 +176,7 @@ export class GiPass implements RenderPass {
       rawDiffuse: make('raw-diffuse', 'rgba16float'),
       rawSpecular: make('raw-specular', 'rgba16float'),
       rawEmissive: make('raw-emissive', 'rgba16float'),
+      microFlags: createMicroFlags(this.device, 'gi-trace', hw, hh),
       accDiffuse: pair('acc-diffuse', 'rgba16float'),
       accSpecular: pair('acc-specular', 'rgba16float'),
       accEmissive: pair('acc-emissive', 'rgba16float'),
@@ -195,28 +205,34 @@ export class GiPass implements RenderPass {
     const [hw, hh] = this.halfSize;
     const x = Math.ceil(hw / this.workgroup[0]);
     const y = Math.ceil(hh / this.workgroup[1]);
-    const sky = (p: GPUComputePipeline, bindings: number[]) => this.sky.bindGroup(p.getBindGroupLayout(3), bindings);
+    const sky = (p: GPUComputePipeline, bindings: number[]) => this.sky.bindGroup(this.layout(p, 3), bindings);
 
     if (this.stage !== 'denoise') {
       const tw = ctx.profiler.timestampWrites('gi-trace');
       const pass = ctx.encoder.beginComputePass({ label: 'gi-trace', ...(tw && { timestampWrites: tw }) });
       pass.setPipeline(this.pipelines.prepare);
       pass.setBindGroup(0, this.groups.prepare[c]!);
-      pass.setBindGroup(1, this.brickmap.bindGroup(this.pipelines.prepare.getBindGroupLayout(1)));
+      pass.setBindGroup(1, this.brickmap.bindGroup(this.layout(this.pipelines.prepare, 1)));
       pass.dispatchWorkgroups(x, y);
       pass.setPipeline(this.pipelines.spatial);
       pass.setBindGroup(0, this.groups.spatial[c]!);
       pass.dispatchWorkgroups(x, y);
-      pass.setPipeline(this.pipelines.trace);
-      pass.setBindGroup(0, this.traceGroups()![c]!);
-      // Compact dispatch over the traced pixels only (tracedPixel in gi-common.wgsl).
-      pass.setBindGroup(1, this.brickmap.bindGroup(this.pipelines.trace.getBindGroupLayout(1)));
-      pass.setBindGroup(2, this.materials.bindGroup(this.pipelines.trace.getBindGroupLayout(2), [1, 2, 3, 6]));
-      pass.setBindGroup(3, sky(this.pipelines.trace, [0, 1, 3, 4, 5, 6]));
       const pattern = config.gi.tracePattern;
       const tw2 = pattern === 'all' ? hw : Math.ceil(hw / 2);
       const th2 = pattern === 'quarter' ? Math.ceil(hh / 2) : hh;
-      pass.dispatchWorkgroups(Math.ceil(tw2 / this.workgroup[0]), Math.ceil(th2 / this.workgroup[1]));
+      const groups = this.traceGroups()!;
+      // The main trace, then the shaped-block fix-up on the pixels it flagged.
+      const stages: [GPUComputePipeline, GPUBindGroup][] = [[this.pipelines.trace, groups.main[c]!]];
+      if (this.fixup) stages.push([this.fixup, groups.fixup[c]!]);
+      for (const [p, group] of stages) {
+        pass.setPipeline(p);
+        pass.setBindGroup(0, group);
+        // Compact dispatch over the traced pixels only (tracedPixel in gi-common.wgsl).
+        pass.setBindGroup(1, this.brickmap.bindGroup(this.layout(p, 1), GpuBrickmap.TRACE_BINDINGS));
+        pass.setBindGroup(2, this.materials.bindGroup(this.layout(p, 2), [1, 2, 3, 6]));
+        pass.setBindGroup(3, sky(p, [0, 1, 3, 4, 5, 6]));
+        pass.dispatchWorkgroups(Math.ceil(tw2 / this.workgroup[0]), Math.ceil(th2 / this.workgroup[1]));
+      }
       pass.end();
     }
     if (this.stage !== 'trace') {
@@ -299,19 +315,25 @@ export class GiPass implements RenderPass {
     this.traceLit = null;
   }
 
+  private layout(p: GPUComputePipeline, group: number): GPUBindGroupLayout {
+    let list = this.layouts.get(p);
+    if (!list) this.layouts.set(p, (list = []));
+    return (list[group] ??= p.getBindGroupLayout(group));
+  }
+
   /** Trace groups also bind last frame's lit image, which the lighting pass re-creates on
-   *  resize after this pass: built on first use. */
-  private traceGroups(): GPUBindGroup[] | null {
+   *  resize after this pass: built on first use. Per parity, for the main and fix-up pipelines. */
+  private traceGroups(): { main: GPUBindGroup[]; fixup: GPUBindGroup[] } | null {
     const lit = this.prevLit() ?? this.fallbackLit;
-    if (lit === this.traceLit && this.groups!.trace.length) return this.groups!.trace;
+    if (lit === this.traceLit && this.groups!.trace.length) return { main: this.groups!.trace, fixup: this.traceFixupGroups };
     const t = this.tex!;
     const g = this.gbuffer;
-    const p = this.pipelines.trace;
     this.traceLit = lit;
-    this.groups!.trace = [0, 1].map((c) =>
+    const dummy = microFlagDummy(this.device).createView();
+    const make = (p: GPUComputePipeline, c: number, flagOut: GPUTextureView, flagIn: GPUTextureView) =>
       this.device.createBindGroup({
-        label: 'gi-trace',
-        layout: p.getBindGroupLayout(0),
+        label: p.label,
+        layout: this.layout(p, 0),
         entries: [
           { binding: 0, resource: { buffer: this.camera() } },
           { binding: 1, resource: { buffer: this.params } },
@@ -326,11 +348,17 @@ export class GiPass implements RenderPass {
           { binding: 10, resource: lit.createView() },
           { binding: 11, resource: { buffer: this.historyExposure } },
           { binding: 12, resource: t.rawEmissive.createView() },
+          { binding: 13, resource: flagOut },
+          { binding: 14, resource: flagIn },
         ],
-      }),
-    );
-    return this.groups!.trace;
+      });
+    this.groups!.trace = [0, 1].map((c) => make(this.pipelines.trace, c, t.microFlags.createView(), dummy));
+    const fixup = this.fixup;
+    this.traceFixupGroups = fixup ? [0, 1].map((c) => make(fixup, c, dummy, t.microFlags.createView())) : [];
+    return { main: this.groups!.trace, fixup: this.traceFixupGroups };
   }
+
+  private traceFixupGroups: GPUBindGroup[] = [];
 
   private traceLit: GPUTexture | null = null;
   /** Bound before the lighting pass has an output (screen reuse is off then). */

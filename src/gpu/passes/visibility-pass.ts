@@ -1,7 +1,8 @@
 import { config } from '../../config';
-import type { GpuBrickmap } from '../brickmap';
+import { GpuBrickmap } from '../brickmap';
 import type { GBuffer } from '../gbuffer';
 import type { MaterialSystem } from '../materials';
+import { createMicroFlags, createMicroPipelines, microFlagDummy } from '../micro-fixup';
 import { createShaderModule } from '../shader';
 import type { SkySystem } from '../sky';
 import { traceConstants } from '../trace-constants';
@@ -16,6 +17,11 @@ export class VisibilityPass implements RenderPass {
   readonly name = 'visibility';
 
   private tracePipeline!: GPUComputePipeline;
+  /** Shaped-block fix-up (micro-fixup.ts) and its flags, groups and layouts. */
+  private fixupPipeline: GPUComputePipeline | null = null;
+  private fixupGroup: GPUBindGroup | null = null;
+  private fixupLayouts: { brickmap: GPUBindGroupLayout; materials: GPUBindGroupLayout; sky: GPUBindGroupLayout } | null = null;
+  private flags: GPUTexture | null = null;
   private temporalPipeline!: GPUComputePipeline;
   private spatialPipeline!: GPUComputePipeline;
   /** Spatially filtered visibility (what lighting reads). */
@@ -59,12 +65,9 @@ export class VisibilityPass implements RenderPass {
       createShaderModule(this.device, 'temporal.wgsl'),
     ]);
     const [wx, wy] = this.workgroup;
-    [this.tracePipeline, this.temporalPipeline, this.spatialPipeline] = await Promise.all([
-      this.device.createComputePipelineAsync({
-        label: 'visibility',
-        layout: 'auto',
-        compute: { module: trace, entryPoint: 'main', constants: { WORKGROUP_X: wx, WORKGROUP_Y: wy, ...traceConstants() } },
-      }),
+    let tracePipelines;
+    [tracePipelines, this.temporalPipeline, this.spatialPipeline] = await Promise.all([
+      createMicroPipelines(this.device, 'visibility', trace, { WORKGROUP_X: wx, WORKGROUP_Y: wy, ...traceConstants() }),
       this.device.createComputePipelineAsync({
         label: 'temporal',
         layout: 'auto',
@@ -76,17 +79,19 @@ export class VisibilityPass implements RenderPass {
         compute: { module: temporal, entryPoint: 'spatial', constants: { WORKGROUP_X: wx, WORKGROUP_Y: wy } },
       }),
     ]);
-    this.layouts = {
-      brickmap: this.tracePipeline.getBindGroupLayout(1),
-      materials: this.tracePipeline.getBindGroupLayout(2),
-      sky: this.tracePipeline.getBindGroupLayout(3),
-    };
+    this.tracePipeline = tracePipelines.main;
+    this.fixupPipeline = tracePipelines.fixup;
+    const layouts = (p: GPUComputePipeline) => ({ brickmap: p.getBindGroupLayout(1), materials: p.getBindGroupLayout(2), sky: p.getBindGroupLayout(3) });
+    this.layouts = layouts(this.tracePipeline);
+    this.fixupLayouts = this.fixupPipeline && layouts(this.fixupPipeline);
   }
 
   resize(width: number, height: number): void {
     const g = this.gbuffer;
     if (!g.gbuffer0 || !g.depth || !g.motion) return;
-    for (const t of [this.raw, this.prevGbuffer, this.prevDepth, this.filtered, ...(this.history ?? [])]) t?.destroy();
+    for (const t of [this.raw, this.prevGbuffer, this.prevDepth, this.filtered, this.flags, ...(this.history ?? [])]) t?.destroy();
+    this.flags = createMicroFlags(this.device, 'visibility', width, height);
+    const dummy = microFlagDummy(this.device).createView();
     const copyTarget = (label: string, format: GPUTextureFormat) =>
       this.device.createTexture({ label, size: { width, height }, format, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     this.prevGbuffer = copyTarget('prev-gbuffer0', 'rgba32uint');
@@ -101,17 +106,22 @@ export class VisibilityPass implements RenderPass {
     this.raw = make('visibility-raw');
     this.filtered = make('visibility-filtered');
     this.history = [make('visibility-history-a'), make('visibility-history-b')];
-    this.traceGroup = this.device.createBindGroup({
-      label: 'visibility',
-      layout: this.tracePipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: this.camera() } },
-        { binding: 1, resource: g.gbuffer0.createView() },
-        { binding: 2, resource: g.depth.createView() },
-        { binding: 3, resource: this.raw.createView() },
-        { binding: 4, resource: { buffer: this.params } },
-      ],
-    });
+    const traceGroup = (pipeline: GPUComputePipeline, flagOut: GPUTextureView, flagIn: GPUTextureView) =>
+      this.device.createBindGroup({
+        label: pipeline.label,
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.camera() } },
+          { binding: 1, resource: g.gbuffer0!.createView() },
+          { binding: 2, resource: g.depth!.createView() },
+          { binding: 3, resource: this.raw!.createView() },
+          { binding: 4, resource: { buffer: this.params } },
+          { binding: 5, resource: flagOut },
+          { binding: 6, resource: flagIn },
+        ],
+      });
+    this.traceGroup = traceGroup(this.tracePipeline, this.flags.createView(), dummy);
+    this.fixupGroup = this.fixupPipeline && traceGroup(this.fixupPipeline, dummy, this.flags.createView());
     const temporal = (write: GPUTexture, read: GPUTexture) =>
       this.device.createBindGroup({
         label: 'temporal',
@@ -175,11 +185,20 @@ export class VisibilityPass implements RenderPass {
     const pass = ctx.encoder.beginComputePass({ label: this.name, ...(timestampWrites && { timestampWrites }) });
     pass.setPipeline(this.tracePipeline);
     pass.setBindGroup(0, this.traceGroup);
-    pass.setBindGroup(1, this.brickmap.bindGroup(this.layouts.brickmap));
+    pass.setBindGroup(1, this.brickmap.bindGroup(this.layouts.brickmap, GpuBrickmap.TRACE_BINDINGS));
     // Alpha testing only reads albedo: params, tables, albedo array, sampler.
     pass.setBindGroup(2, this.materials.bindGroup(this.layouts.materials, [0, 1, 2, 3, 6, 10]));
     pass.setBindGroup(3, this.sky.bindGroup(this.layouts.sky, [0]));
     pass.dispatchWorkgroups(Math.ceil(w / block), Math.ceil(h / block));
+    if (this.fixupPipeline && this.fixupGroup && this.fixupLayouts) {
+      // Pixels whose rays stopped at a shaped block, redone on its micro grid.
+      pass.setPipeline(this.fixupPipeline);
+      pass.setBindGroup(0, this.fixupGroup);
+      pass.setBindGroup(1, this.brickmap.bindGroup(this.fixupLayouts.brickmap, GpuBrickmap.TRACE_BINDINGS));
+      pass.setBindGroup(2, this.materials.bindGroup(this.fixupLayouts.materials, [0, 1, 2, 3, 6, 10]));
+      pass.setBindGroup(3, this.sky.bindGroup(this.fixupLayouts.sky, [0]));
+      pass.dispatchWorkgroups(Math.ceil(w / block), Math.ceil(h / block));
+    }
     pass.setPipeline(this.temporalPipeline);
     pass.setBindGroup(0, this.temporalGroups[this.current]!);
     pass.dispatchWorkgroups(w, h);

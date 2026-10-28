@@ -13,7 +13,9 @@
  *        exposure / accumulation, then saves OUT/name.png (1440×800).
  * bench: per variant restores the config, applies the patch, and prints the minimum over
  *        RUNS (5) of Renderer.benchmarkFrame(ITER = 30) — ms per stage.
- * PRE (shots): JS expression evaluated after each load, before the wait.
+ * PRE (shots, bench): JS expression evaluated after each load, before the wait / settling.
+ * DPR (1): device pixel ratio; SCALE (bench, 1): render scale. DPR=2 SCALE=0.5 = a Retina
+ *        window at the default render scale (1440×800 traced pixels).
  * Env: PORT (5199), SETTLE (ms before measuring, 15000), TIMEOUT (ms, 900000).
  */
 import { spawn } from 'node:child_process';
@@ -77,7 +79,7 @@ const evaluate = async (expression) =>
   (await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true })).result?.result?.value;
 await send('Runtime.enable');
 await send('Page.enable');
-await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 800, deviceScaleFactor: 1, mobile: false });
+await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 800, deviceScaleFactor: Number(env.DPR ?? 1), mobile: false });
 
 /** Loads a pose and waits until the app is up and the world around it has streamed in. */
 async function load(query) {
@@ -115,7 +117,8 @@ if (mode === 'shots') {
     console.log('shot', name);
   }
 } else if (mode === 'bench') {
-  await load(`cam=${env.CAM ?? '0.5,234,0.5,0,-20'}&scale=1${env.EXTRA ?? ''}`);
+  await load(`cam=${env.CAM ?? '0.5,234,0.5,0,-20'}&scale=${env.SCALE ?? 1}${env.EXTRA ?? ''}`);
+  if (env.PRE) console.log('pre', await evaluate(env.PRE));
   await sleep(Number(env.SETTLE ?? 15000));
   await evaluate('window.__base = structuredClone(window.webcraft.config), 1');
   for (const [name, patch] of JSON.parse(env.VARIANTS ?? '[["base",{}]]')) {

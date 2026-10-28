@@ -19,6 +19,7 @@ import { defaultWorkerCount, TerrainWorkerPool } from './world/gen/worker-pool';
 import { ChunkStreamer } from './world/streamer';
 import { World } from './world/world';
 import { BlockId, isSolid } from './world/blocks';
+import { rng } from './world/shapes';
 import { EmitterRegistry } from './world/emitters';
 
 async function main(): Promise<void> {
@@ -36,6 +37,7 @@ async function main(): Promise<void> {
   }
   if (overrides.workgroup) config.trace.workgroup = overrides.workgroup;
   if (overrides.gi !== undefined) config.gi.enabled = overrides.gi;
+  if (overrides.micro !== undefined) config.detail.microVoxels = overrides.micro;
   if (overrides.power !== undefined) config.power.enabled = overrides.power;
   if (overrides.prepassTile) config.trace.prepassTile = overrides.prepassTile;
   if (overrides.distanceMax) config.trace.distanceMax = overrides.distanceMax;
@@ -70,27 +72,31 @@ async function main(): Promise<void> {
     0.5,
   ];
   /**
-   * Debug: puts torches on the ground around the camera (lighting tests; there is no
-   * block placing yet). Scans each random column down from just above the camera for the
-   * first air cell resting on a solid block (works in caves too). Returns how many.
+   * Debug: puts blocks on the ground around the camera (tests; there is no block placing
+   * yet). Scans each random column down from just above the camera for the first air cell
+   * resting on a solid block (works in caves too). Returns how many.
    */
-  const placeTorches = (count: number, radius: number): number => {
+  const placeOnGround = (id: number, count: number, radius: number, random: () => number = Math.random): number => {
     const [cx, cy, cz] = camera.position;
     let placed = 0;
     for (let attempt = 0; attempt < count * 20 && placed < count; attempt++) {
-      const a = Math.random() * 2 * Math.PI;
-      const r = radius * Math.sqrt(Math.random());
+      const a = random() * 2 * Math.PI;
+      const r = radius * Math.sqrt(random());
       const x = Math.floor(cx + Math.cos(a) * r);
       const z = Math.floor(cz + Math.sin(a) * r);
       for (let y = Math.floor(cy) + 4; y > cy - radius * 2; y--) {
         if (world.getBlock(x, y, z) !== BlockId.air || !isSolid(world.getBlock(x, y - 1, z))) continue;
-        if (world.setBlock(x, y, z, BlockId.torch)) placed++;
+        if (world.setBlock(x, y, z, id)) placed++;
         break;
       }
     }
     return placed;
   };
+  const placeTorches = (count: number, radius: number) => placeOnGround(BlockId.torch, count, radius);
+  /** Seeded (same pose → same rocks), so before/after shots match. */
+  const placeRocks = (count: number, radius: number) => placeOnGround(BlockId.broken_stone, count, radius, rng(1));
   let pendingTorches = overrides.torches ?? 0;
+  let pendingRocks = overrides.rocks ?? 0;
 
   const pose = overrides.camera;
   let camera = pose ? new FlyCamera(pose.position, pose.pitchDeg, pose.yawDeg) : new FlyCamera(spawn());
@@ -115,6 +121,7 @@ async function main(): Promise<void> {
     onVerifyPrepass: () => renderer.verifyPrepass(),
     onBenchmarkFrame: () => renderer.benchmarkFrame(config.debug.benchmarkIterations),
     onPlaceTorches: () => placeTorches(config.debug.testTorches, config.debug.testTorchRadius),
+    onPlaceRocks: () => placeRocks(config.debug.testRocks, config.debug.testRockRadius),
     emitterCount: () => emitters.total,
     clock,
     skyState: () => sky.state,
@@ -139,7 +146,8 @@ async function main(): Promise<void> {
   // Dev builds: expose internals for automated tests and benchmarks (console / CDP).
   if (import.meta.env.DEV) Object.assign(window, {
       webcraft: {
-        config, renderer, world, emitters, streamer, placeTorches,
+        config, renderer, world, emitters, streamer, placeTorches, placeRocks,
+        verifyTrace: () => verifyTrace(gpu.device, brickmap, world, camera.position),
         setCamera: (x: number, y: number, z: number, yawDeg: number, pitchDeg: number) => {
           camera = new FlyCamera([x, y, z], pitchDeg, yawDeg);
         },
@@ -165,6 +173,10 @@ async function main(): Promise<void> {
       // &torches=N: once the chunks around the camera are loaded.
       if (pendingTorches > 0 && world.chunkCount > 0 && streamer.stats.missing === 0) {
         pendingTorches -= placeTorches(pendingTorches, config.debug.testTorchRadius);
+      }
+      if (pendingRocks > 0 && world.chunkCount > 0 && streamer.stats.missing === 0) {
+        placeRocks(pendingRocks, config.debug.testRockRadius);
+        pendingRocks = 0;
       }
       const changes = world.takeChanges();
       // World edits and streamed chunks count as motion (energy saving wakes up).

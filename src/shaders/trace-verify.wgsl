@@ -20,6 +20,10 @@ struct RayOut {
   hit: u32,
   normal: vec3i,
   id: u32,
+  t: f32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
 };
 
 override WORKGROUP_SIZE: u32 = 64u;
@@ -35,5 +39,5 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   }
   let ray = rays[id.x];
   let r = traceRay(ray.cell, ray.frac, ray.dir, 0.0, ray.max_t, MAX_STEPS);
-  results[id.x] = RayOut(r.cell, select(0u, 1u, r.hit), r.normal, r.id);
+  results[id.x] = RayOut(r.cell, select(0u, 1u, r.hit), r.normal, r.id, r.t, 0u, 0u, 0u);
 }

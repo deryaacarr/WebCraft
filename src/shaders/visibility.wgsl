@@ -13,6 +13,10 @@
 //                occlusion only, fewer steps).
 // (A coarser alpha-test LOD from the primary pixel footprint was tried: no faster, and it
 // closed leaf holes — coverage-preserving mips — so the fine LOD is kept.)
+//
+// Shaped blocks (trace.wgsl MICRO_WALK): the main pipeline flags pixels where either ray
+// stopped at one (cubes there); the fix-up pipeline recomputes just those pixels, with the
+// same random numbers, on the micro grid.
 #include "trace.wgsl"
 #include "gbuffer.wgsl"
 #include "camera.wgsl"
@@ -42,6 +46,8 @@ var<private> leaf_light: f32;
 var<private> sky_ray: u32;
 /// Set by traceOpaque when a sky ray was stopped by a leaf.
 var<private> stopped_by_leaf: bool;
+/// Set when a ray stopped at a shaped block (main pipeline: the pixel needs the fix-up).
+var<private> hit_shaped: bool;
 
 /// Pixel of each 2×2 block traced in a frame (rotating so all four get samples).
 fn tracedOffset(frame: u32) -> vec2u {
@@ -58,6 +64,9 @@ const SURFACE_OFFSET: f32 = 1e-3;
 @group(0) @binding(2) var gdepth: texture_2d<f32>;
 @group(0) @binding(3) var output: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(4) var<uniform> params: VisibilityParams;
+/// Fix-up flags (see primary.wgsl): main pipeline writes, fix-up reads.
+@group(0) @binding(5) var micro_flag_out: texture_storage_2d<r32uint, write>;
+@group(0) @binding(6) var micro_flag_in: texture_2d<u32>;
 
 fn traceOpaque(id: u32, cell: vec3i, normal: vec3i, local: vec3f, t: f32, dir: vec3f) -> bool {
   let inside = all(normal == vec3i(0));
@@ -125,6 +134,7 @@ fn transmittance(start: vec3f, dir: vec3f, distance: f32, max_steps: u32) -> f32
   if (!r.hit) {
     return leaf_light;
   }
+  hit_shaped = hit_shaped || isShapedId(r.id);
   return select(0.0, params.leaf_transmission, stopped_by_leaf);
 }
 
@@ -137,9 +147,16 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   }
   let gid = vec3u(pixel, 0u);
   let px = vec2i(gid.xy);
+  if (MICRO_WALK && textureLoad(micro_flag_in, px, 0).x == 0u) {
+    return;
+  }
+  hit_shaped = false;
   let g = textureLoad(gbuffer0, px, 0);
   if (gbIsSky(g.w)) {
     textureStore(output, px, vec4f(1.0, 1.0, 0.0, 0.0));
+    if (!MICRO_WALK) {
+      textureStore(micro_flag_out, px, vec4u(0u));
+    }
     return;
   }
   let uv = (vec2f(gid.xy) + 0.5) / vec2f(cam.size);
@@ -173,4 +190,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   }
 
   textureStore(output, px, vec4f(sun, skyv, 0.0, 0.0));
+  if (!MICRO_WALK) {
+    textureStore(micro_flag_out, px, vec4u(select(0u, 1u, hit_shaped), 0u, 0u, 0u));
+  }
 }

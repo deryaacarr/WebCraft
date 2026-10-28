@@ -67,6 +67,7 @@ export const BlockId = {
   glass: 11,
   torch: 12,
   lava: 13,
+  broken_stone: 14,
 } as const;
 
 export type BlockName = keyof typeof BlockId;
@@ -131,6 +132,9 @@ const SPECS = {
   glass: { solid: true, transparent: true, emissive: 0, faces: 'glass', footstep: 'stone', color: 0xcfe8f0 },
   torch: { solid: false, transparent: true, emissive: 8, faces: 'torch', footstep: null, color: 0xffc050 },
   lava: { solid: false, transparent: false, emissive: 4, faces: 'lava', footstep: null, color: 0xff5a10 },
+  // Sub-voxel shape (shapes.ts): only part of the cell is filled, so it counts as
+  // transparent (light and view pass the empty part; neighbours' faces stay visible).
+  broken_stone: { solid: true, transparent: true, emissive: 0, faces: 'stone', footstep: 'stone', color: 0x7f7f7f },
 } satisfies Record<BlockName, BlockSpec>;
 
 function toFaceMaterials(faces: BlockSpec['faces']): FaceMaterials {

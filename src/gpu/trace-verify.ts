@@ -1,23 +1,29 @@
 import { config } from '../config';
 import type { Vec3 } from '../core/math';
 import { raycast } from '../world/raycast';
+import { isShaped } from '../world/shapes';
 import type { World } from '../world/world';
-import type { GpuBrickmap } from './brickmap';
+import { GpuBrickmap } from './brickmap';
 import { createShaderModule } from './shader';
 import { traceConstants } from './trace-constants';
 
 export interface TraceVerifyResult {
   rays: number;
-  /** Rays where GPU and CPU agree on hit/miss, cell, face normal and block. */
+  /** Rays where GPU and CPU agree on hit/miss, cell, face normal, block and distance. */
   agree: number;
   hits: number;
+  /** CPU hits on sub-voxel shaped blocks (shapes.ts). */
+  shapedHits: number;
   ms: number;
   firstMismatch?: { origin: Vec3; dir: Vec3; cpu: string; gpu: string };
 }
 
-// RayIn: cell vec3i + pad, frac vec3f + pad, dir vec3f + max_t → 48 bytes; RayOut: 32 bytes.
+// RayIn: cell vec3i + pad, frac vec3f + pad, dir vec3f + max_t → 48 bytes; RayOut: cell,
+// hit, normal, id, t + 3 pad → 48 bytes.
 const RAY_IN_WORDS = 12;
-const RAY_OUT_WORDS = 8;
+const RAY_OUT_WORDS = 12;
+/** Hit distances may differ by float32 rounding (GPU) vs float64 (CPU). */
+const T_TOLERANCE = 1e-3;
 
 /**
  * Debug check of the GPU hierarchical DDA: random rays from around `origin` are traced on
@@ -67,7 +73,8 @@ export async function verifyTrace(device: GPUDevice, brickmap: GpuBrickmap, worl
     compute: {
       module,
       entryPoint: 'main',
-      constants: { WORKGROUP_SIZE: workgroup, MAX_STEPS: config.trace.verifyMaxSteps, ...traceConstants() },
+      // MICRO_WALK: the full tracer, shaped blocks on their micro grid (the fix-up path).
+      constants: { WORKGROUP_SIZE: workgroup, MAX_STEPS: config.trace.verifyMaxSteps, ...traceConstants(), MICRO_WALK: 1 },
     },
   });
   const outBytes = n * RAY_OUT_WORDS * 4;
@@ -89,17 +96,19 @@ export async function verifyTrace(device: GPUDevice, brickmap: GpuBrickmap, worl
       ],
     }),
   );
-  pass.setBindGroup(1, brickmap.bindGroup(pipeline.getBindGroupLayout(1)));
+  pass.setBindGroup(1, brickmap.bindGroup(pipeline.getBindGroupLayout(1), GpuBrickmap.TRACE_BINDINGS));
   pass.dispatchWorkgroups(Math.ceil(n / workgroup));
   pass.end();
   encoder.copyBufferToBuffer(outBuf, 0, readBuf, 0, outBytes);
   device.queue.submit([encoder.finish()]);
   await readBuf.mapAsync(GPUMapMode.READ);
-  const out = new Int32Array(readBuf.getMappedRange().slice(0));
+  const bytes = readBuf.getMappedRange().slice(0);
+  const out = new Int32Array(bytes);
+  const outT = new Float32Array(bytes);
   readBuf.unmap();
   for (const b of [inBuf, outBuf, readBuf]) b.destroy();
 
-  const result: TraceVerifyResult = { rays: n, agree: 0, hits: 0, ms: 0 };
+  const result: TraceVerifyResult = { rays: n, agree: 0, hits: 0, shapedHits: 0, ms: 0 };
   for (let i = 0; i < n; i++) {
     const o = i * RAY_OUT_WORDS;
     const gpuHit = out[o + 3] === 1;
@@ -107,8 +116,10 @@ export async function verifyTrace(device: GPUDevice, brickmap: GpuBrickmap, worl
     const h = raycast(world, origins[i]!, dirs[i]!, maxT);
     const cpu = h ? `${h.cell.join(',')} n=${h.normal.join(',')} id=${h.id}` : 'miss';
     if (h) result.hits++;
-    if (cpu === gpu) result.agree++;
-    else result.firstMismatch ??= { origin: origins[i]!, dir: dirs[i]!, cpu, gpu };
+    if (h && isShaped(h.id)) result.shapedHits++;
+    const dt = h && gpuHit ? Math.abs(outT[o + 8]! - h.t) : 0;
+    if (cpu === gpu && dt <= T_TOLERANCE) result.agree++;
+    else result.firstMismatch ??= { origin: origins[i]!, dir: dirs[i]!, cpu: `${cpu} t=${h?.t}`, gpu: `${gpu} t=${outT[o + 8]}` };
   }
   result.ms = performance.now() - start;
   return result;
