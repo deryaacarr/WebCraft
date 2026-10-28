@@ -10,6 +10,7 @@ import type { BrickmapMemory } from '../gpu/brickmap';
 import type { VerifyResult } from '../gpu/brickmap-verify';
 import type { BrickStoreStats } from '../gpu/brick-store';
 import type { GpuProfiler } from '../gpu/profiler';
+import { MAX_WET_ZONES } from '../gpu/water';
 import type { TraceVerifyResult } from '../gpu/trace-verify';
 
 const MB = 2 ** 20;
@@ -200,6 +201,7 @@ export class DebugOverlay {
     this.buildMaterialControls(hooks);
     this.buildDetailControls();
     this.buildWaterControls();
+    this.buildWetnessControls(hooks);
     this.buildSkyControls(hooks);
     this.buildGiControls(hooks);
     this.buildExposureControls();
@@ -485,6 +487,30 @@ export class DebugOverlay {
     f.add(w, 'foamWidth', 0.02, 0.5, 0.01).name('foam width (m)');
     f.add(w, 'caustics', 0, 2, 0.05).name('caustics');
     f.add(w, 'wetShore', 0, 1, 0.05).name('wet shore');
+    f.add(w, 'lightShafts', 0, 1, 0.05).name('light shafts (under water)');
+    f.close();
+  }
+
+  private buildWetnessControls(hooks: DebugOverlayHooks): void {
+    const w = config.wetness;
+    const f = this.gui.addFolder('Wetness');
+    f.add(w, 'global', 0, 1, 0.01).name('global (rain)');
+    f.add(w, 'puddles', 0, 1, 0.05).name('puddles');
+    f.add(w, 'puddleScale', 0.5, 10, 0.1).name('puddle size (m)');
+    const zone = { radius: 6, amount: 1 };
+    f.add(zone, 'radius', 1, 32, 1).name('new zone radius');
+    const actions = {
+      add: () => {
+        const [x, y, z] = hooks.cameraInfo().position;
+        if (w.zones.length >= MAX_WET_ZONES) w.zones.shift();
+        w.zones.push({ x, y: y - 2, z, radius: zone.radius, amount: zone.amount });
+      },
+      clear: () => {
+        w.zones.length = 0;
+      },
+    };
+    f.add(actions, 'add').name('wet zone at camera');
+    f.add(actions, 'clear').name('clear wet zones');
     f.close();
   }
 

@@ -45,11 +45,17 @@ var<private> in_water: bool;
 
 /// Water surface below the top face of the top water voxel (`surface` writes, the fix-up
 /// reads): x = distance along the camera ray (f32 bits; 0 = none: refract at the hit face),
-/// y = surface normal (octahedral pack2x16snorm) or WATER_NO_SURFACE (an obstacle stands
-/// in the air above the surface: no water for this ray).
+/// y = surface normal (octahedral pack2x16snorm) or WATER_NO_SURFACE (no surface for this
+/// ray: an obstacle stands in the air above it, or the ray runs level or rises through the
+/// air above it — it goes on straight, water ignored).
 @group(0) @binding(11) var water_surface_out: texture_storage_2d<rg32uint, write>;
 @group(0) @binding(12) var water_surface_in: texture_2d<u32>;
 const WATER_NO_SURFACE: u32 = 0xffffffffu;
+
+/// Camera under water: a pipeline of its own (primary-pass.ts uses it instead of the main
+/// pipeline and the fix-ups while the camera is under water), so none of its code weighs on
+/// the pipelines that run above water. Compiled with MICRO_WALK (shaped blocks inline).
+override UNDERWATER: bool = false;
 
 /// Fixed-point iterations for the ray / wavy surface intersection.
 const WAVE_ITERATIONS: i32 = 3;
@@ -84,7 +90,7 @@ fn clipToUv(clip: vec4f) -> vec2f {
 fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(workgroup_id) wid: vec3u,
         @builtin(local_invocation_id) lid: vec3u) {
   var gid = global_id.xy;
-  if (MICRO_WALK) {
+  if (MICRO_WALK && !UNDERWATER) {
     // Workgroup i handles the i-th listed tile.
     let tile = micro_tile_list[TILE_HEADER + tileCount() + wid.x];
     gid = vec2u(tile % tilesX(), tile / tilesX()) * vec2u(WORKGROUP_X, WORKGROUP_Y) + lid.xy;
@@ -94,7 +100,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(workgroup_id) 
   }
   let px = vec2i(gid);
   var flag = 0u;
-  if (MICRO_WALK) {
+  if (MICRO_WALK && !UNDERWATER) {
     flag = textureLoad(micro_flag_in, px, 0).x;
     if (flag == 0u) {
       return;
@@ -106,13 +112,85 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(workgroup_id) 
   if (cam.prepass_tile > 0u) {
     t_min = textureLoad(coarse, vec2i(gid / cam.prepass_tile), 0).x;
   }
-  if (MICRO_WALK) {
+  if (MICRO_WALK && !UNDERWATER) {
     // Nothing is hit before the shaped block or water the main pipeline stopped at.
     t_min = max(t_min, bitcast<f32>(flag) * (1.0 - 1e-5) - 1e-4);
   }
 
-  var r = traceRay(cam.origin_cell, cam.origin_frac, dir, t_min, cam.far, cam.max_steps);
+  // Hit position relative to the camera, direction and length of the ray that reached it.
+  var r: TraceResult;
+  var p = vec3f(0.0);
+  var hit_dir = dir;
+  var hit_dist = 0.0;
+  var water_sample = vec4f(0.0);
   let water_on = water.enabled != 0u;
+  if (UNDERWATER) {
+    // Camera under water (its own pipeline, see UNDERWATER): through the water up to the
+    // wavy surface above, then out through Snell's window into the air (refracted) or,
+    // beyond the critical angle, mirrored back down (total internal reflection). Two
+    // segments, one traversal call site.
+    var t_s = cam.far;
+    var n_s = vec3f(0.0, 1.0, 0.0);
+    if (dir.y > 1e-3) {
+      var t = (water.camera_surface - cam.origin_frac.y) / dir.y;
+      for (var k = 0; k < WAVE_ITERATIONS; k++) {
+        let s = cam.origin_frac + dir * t;
+        t = max((water.camera_surface + waterWaveHeight(vec2f(cam.origin_cell.xz) + s.xz, t * material_params.pixel_spread) - cam.origin_frac.y) / dir.y, 0.0);
+      }
+      t_s = t;
+      let s = cam.origin_frac + dir * t;
+      n_s = waterWaves(vec2f(cam.origin_cell.xz) + s.xz, t * material_params.pixel_spread).normal;
+    }
+    var out_dir = refract(dir, -n_s, water.ior);
+    let tir = all(out_dir == vec3f(0.0));
+    if (tir) {
+      out_dir = reflect(dir, -n_s);
+    }
+    in_water = true;
+    trace_skip_id = WATER_ID;
+    var o_cell = cam.origin_cell;
+    var o_frac = cam.origin_frac;
+    var seg_dir = dir;
+    var t0 = 0.0;
+    var t1 = min(t_s, water.max_distance);
+    var crossed = false;
+    let segments = select(2u, 1u, cam.size.x == 0u);
+    for (var k = 0u; k < segments; k++) {
+      r = traceRay(o_cell, o_frac, seg_dir, t0, t1, cam.max_steps);
+      if (r.hit || k == 1u || t_s >= water.max_distance) {
+        break;
+      }
+      crossed = true;
+      let s_rel = cam.origin_frac + dir * t_s;
+      let cell = vec3i(floor(s_rel));
+      o_cell = cam.origin_cell + cell;
+      o_frac = s_rel - vec3f(cell);
+      seg_dir = out_dir;
+      t0 = 0.0;
+      // Back under water after a total reflection: what is left of the trace distance.
+      // Out in the air the ray starts in the top water voxel's air (above the surface), so
+      // water stays see-through there too (it rises away from any other water).
+      t1 = select(cam.far, water.max_distance - t_s, tir);
+      trace_skip_id = select(0u, WATER_ID, tir);
+    }
+    in_water = false;
+    trace_skip_id = 0u;
+    if (crossed) {
+      water_sample = packWaterSample(max(t_s, 1e-6), select(t1, r.t, r.hit), n_s, select(WATER_EXIT, WATER_TIR, tir));
+      p = dir * t_s + out_dir * r.t;
+      hit_dir = out_dir;
+      hit_dist = t_s + r.t;
+    } else {
+      p = dir * r.t;
+      hit_dist = r.t;
+      if (!r.hit) {
+        // Nothing within the trace distance: fog only (lighting.wgsl).
+        water_sample = vec4f(0.0, t1, 0.0, WATER_FOG);
+      }
+    }
+    textureStore(gwater, px, water_sample);
+  } else {
+  r = traceRay(cam.origin_cell, cam.origin_frac, dir, t_min, cam.far, cam.max_steps);
   if (!MICRO_WALK && r.hit && (isShapedId(r.id) || (water_on && r.id == WATER_ID))) {
     // The flags are cleared every frame (primary-pass.ts): only flagged pixels write. An
     // unconditional store per pixel cost the main pipeline ~0.4 ms.
@@ -132,20 +210,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(workgroup_id) 
     }
   }
 
-  // Hit position relative to the camera, direction and length of the ray that reached it.
-  var p = dir * r.t;
-  var hit_dir = dir;
-  var hit_dist = r.t;
-  var water_sample = vec4f(0.0);
+  p = dir * r.t;
+  hit_dist = r.t;
   if (MICRO_WALK && water_on && r.hit && r.id == WATER_ID) {
-    // Into the water, from the surface the `surface` entry point found below the top water
-    // voxel's top face (waves; none: the face itself; a ray starting inside goes straight
+    // Into the water, from the surface the `surface` entry point found in the top water
+    // voxel's air (waves; none: the face itself; a ray starting inside water goes straight
     // on). One traversal: refracted from the surface to the bottom — or, when something
     // stands in the air above the surface (a shore block's side), straight on to it.
-    let inside = all(r.normal == vec3i(0));
+    let ws = textureLoad(water_surface_in, px, 0);
+    // Started inside water with no surface found (the camera's voxel above the surface
+    // finds one: see `surface`).
+    let inside = all(r.normal == vec3i(0)) && ws.x == 0u;
     var n_s = select(vec3f(r.normal), -dir, inside);
     var t_s = r.t;
-    let ws = textureLoad(water_surface_in, px, 0);
     let straight = ws.x != 0u && ws.y == WATER_NO_SURFACE;
     if (ws.x != 0u && !straight) {
       t_s = bitcast<f32>(ws.x);
@@ -162,7 +239,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(workgroup_id) 
     trace_skip_id = 0u;
     r.steps += b.steps;
     if (!straight) {
-      water_sample = packWaterSample(max(t_s, 1e-6), select(water.max_distance, b.t, b.hit), n_s);
+      water_sample = packWaterSample(max(t_s, 1e-6), select(water.max_distance, b.t, b.hit), n_s, WATER_FROM_AIR);
       textureStore(gwater, px, water_sample);
       p = dir * t_s + d * b.t;
       hit_dir = d;
@@ -178,6 +255,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(workgroup_id) 
     r.cell = b.cell;
     r.normal = b.normal;
     r.id = b.id;
+  }
   }
 
   let water_flag = select(0u, GB_WATER_FLAG, throughWater(water_sample));
@@ -210,7 +288,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(workgroup_id) 
     // face's plane (see water.wgsl); along the ray at the bottom's depth if it misses it.
     let n_f = faceNormal(face);
     let denom = dot(n_f, dir);
-    let along = dir * (dot(p, cam.forward) / dot(dir, cam.forward));
+    // Fallback: along the camera ray at the hit's distance — always in front of the camera
+    // (the hit's own depth on the forward axis is negative for a bottom seen in the mirror
+    // of total internal reflection while looking up: NaNs in the visibility filters).
+    let along = dir * length(p);
     p = select(along, dir * (dot(n_f, p) / denom), denom < -1e-3 && dot(n_f, p) / denom > 0.0);
   }
   let motion = clipToUv(cam.view_proj * vec4f(p, 1.0)) - clipToUv(cam.prev_view_proj * vec4f(p + cam.prev_delta, 1.0));
@@ -246,14 +327,21 @@ fn surface(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lid:
   let entry = cam.origin_frac + dir * t_hit;
   let cell_rel = vec3i(floor(entry + dir * 1e-4));
   let cell = cam.origin_cell + cell_rel;
-  // Entered through the top face of a water voxel with no water above it.
-  let top = dir.y < -1e-3 && abs(entry.y - f32(cell_rel.y + 1)) < 1e-3;
-  if (!top || getVoxel(cell) != WATER_ID || getVoxel(cell + vec3i(0, 1, 0)) == WATER_ID) {
+  // Entered a water voxel with no water above it in its air, above the surface's rest level
+  // — through its top face, through a side (from the shore, nearly level), or starting
+  // there (the camera just above the surface). Below that level, refract at the face.
+  let in_air = entry.y - f32(cell_rel.y) > water.level;
+  if (!in_air || getVoxel(cell) != WATER_ID || getVoxel(cell + vec3i(0, 1, 0)) == WATER_ID) {
     textureStore(water_surface_out, px, vec4u(0u));
     return;
   }
+  if (dir.y >= -1e-3) {
+    // Level or rising: it never meets this surface; on through the air, water ignored.
+    textureStore(water_surface_out, px, vec4u(1u, WATER_NO_SURFACE, 0u, 0u));
+    return;
+  }
   let rest_y = f32(cell_rel.y) + water.level;
-  let footprint = t_hit * material_params.pixel_spread;
+  let footprint = max(t_hit, 1.0) * material_params.pixel_spread;
   var t = max(t_hit, (rest_y - cam.origin_frac.y) / dir.y);
   for (var k = 0; k < WAVE_ITERATIONS; k++) {
     let s = cam.origin_frac + dir * t;

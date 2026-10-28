@@ -24,10 +24,9 @@ export class LightingPass implements RenderPass {
   output: GPUTexture | null = null;
   mode: LightingMode = 'lit';
 
-  private pipeline!: GPUComputePipeline;
-  private skyLayout!: GPUBindGroupLayout;
-  private brickLayout!: GPUBindGroupLayout;
-  private materialLayout!: GPUBindGroupLayout;
+  /** Pipeline variants by `${underwater}${wet}` (lighting.wgsl UNDERWATER_VIEW,
+   *  WET_SURFACES), each with its layouts (auto layouts of different pipelines differ). */
+  private readonly variants = new Map<string, { pipeline: GPUComputePipeline; layouts: GPUBindGroupLayout[] }>();
   private readonly params: GPUBuffer;
   /** Bind groups per set of GI textures (they alternate with the frame parity). */
   private readonly groups = new Map<string, GPUBindGroup>();
@@ -72,14 +71,20 @@ export class LightingPass implements RenderPass {
   async init(): Promise<void> {
     const module = await createShaderModule(this.device, 'lighting.wgsl');
     const [wx, wy] = this.workgroup;
-    this.pipeline = await this.device.createComputePipelineAsync({
-      label: this.name,
-      layout: 'auto',
-      compute: { module, entryPoint: 'main', constants: { WORKGROUP_X: wx, WORKGROUP_Y: wy, ...traceConstants() } },
-    });
-    this.skyLayout = this.pipeline.getBindGroupLayout(3);
-    this.brickLayout = this.pipeline.getBindGroupLayout(1);
-    this.materialLayout = this.pipeline.getBindGroupLayout(2);
+    await Promise.all(
+      ['00', '01', '10', '11'].map(async (key) => {
+        const pipeline = await this.device.createComputePipelineAsync({
+          label: `${this.name}-${key}`,
+          layout: 'auto',
+          compute: {
+            module,
+            entryPoint: 'main',
+            constants: { WORKGROUP_X: wx, WORKGROUP_Y: wy, ...traceConstants(), UNDERWATER_VIEW: Number(key[0]), WET_SURFACES: Number(key[1]) },
+          },
+        });
+        this.variants.set(key, { pipeline, layouts: [0, 1, 2, 3].map((i) => pipeline.getBindGroupLayout(i)) });
+      }),
+    );
   }
 
   resize(width: number, height: number): void {
@@ -102,12 +107,15 @@ export class LightingPass implements RenderPass {
     if (!vis || !this.reflection.output) return;
     const giOn = config.gi.enabled;
     const gi = (giOn && this.gi.outputs) || this.noGi;
-    const key = `${vis.label}|${gi.diffuse.label}|${gi.specular.label}|${gi.emissive.label}|${gi.guide.label}|${this.reflection.output.label}`;
+    const w = config.wetness;
+    const variantKey = `${this.water.cameraUnder ? 1 : 0}${w.global > 0 || w.zones.length > 0 ? 1 : 0}`;
+    const variant = this.variants.get(variantKey)!;
+    const key = `${variantKey}|${vis.label}|${gi.diffuse.label}|${gi.specular.label}|${gi.emissive.label}|${gi.guide.label}|${this.reflection.output.label}`;
     let group = this.groups.get(key);
     if (!group) {
       group = this.device.createBindGroup({
         label: this.name,
-        layout: this.pipeline.getBindGroupLayout(0),
+        layout: variant.layouts[0]!,
         entries: [
           { binding: 0, resource: { buffer: this.camera() } },
           { binding: 1, resource: { buffer: this.params } },
@@ -145,12 +153,12 @@ export class LightingPass implements RenderPass {
 
     const timestampWrites = ctx.profiler.timestampWrites(this.name);
     const pass = ctx.encoder.beginComputePass({ label: this.name, ...(timestampWrites && { timestampWrites }) });
-    pass.setPipeline(this.pipeline);
+    pass.setPipeline(variant.pipeline);
     pass.setBindGroup(0, group);
-    pass.setBindGroup(3, this.sky.bindGroup(this.skyLayout));
-    pass.setBindGroup(1, this.brickmap.bindGroup(this.brickLayout, [0, 1, 2]));
+    pass.setBindGroup(3, this.sky.bindGroup(variant.layouts[3]!));
+    pass.setBindGroup(1, this.brickmap.bindGroup(variant.layouts[1]!, [0, 1, 2]));
     // Worn edges: params, material table, block table, noise volume, sampler.
-    pass.setBindGroup(2, this.materials.bindGroup(this.materialLayout, [0, 1, 2, 6, 10]));
+    pass.setBindGroup(2, this.materials.bindGroup(variant.layouts[2]!, [0, 1, 2, 6, 10]));
     pass.dispatchWorkgroups(Math.ceil(this.output.width / this.workgroup[0]), Math.ceil(this.output.height / this.workgroup[1]));
     pass.end();
   }

@@ -15,6 +15,8 @@
 // block id << 16; w = pack2x16float(W, M). M = 0 means empty.
 #include "gi-common.wgsl"
 #include "brickmap.wgsl"
+#include "water.wgsl"
+#include "wetness.wgsl"
 
 @group(0) @binding(0) var<uniform> cam: Camera;
 @group(0) @binding(1) var<uniform> params: GiParams;
@@ -32,6 +34,9 @@
 // Spatial pass.
 @group(0) @binding(11) var guide: texture_2d<u32>;
 @group(0) @binding(12) var reservoirs_in: texture_2d<u32>;
+/// Wetness (prepare): puddles are smooth and flat in the guide, so GI traces their
+/// specular reflections (see wetness.wgsl).
+@group(0) @binding(13) var<uniform> water: WaterParams;
 
 override WORKGROUP_X: u32 = 8u;
 override WORKGROUP_Y: u32 = 8u;
@@ -98,10 +103,20 @@ fn prepare(@builtin(global_invocation_id) gid: vec3u) {
   let q = fullPixel(p, params.full_size, params.scale);
   let g0 = textureLoad(gbuffer0, vec2i(q), 0);
   let depth = textureLoad(gdepth, vec2i(q), 0).x;
-  let n = octDecode(unpack2x16snorm(g0.y));
+  var n = octDecode(unpack2x16snorm(g0.y));
   let rel = pixelPosition(q, params.full_size, depth);
-  let plane = dot(faceNormal(gbFace(g0.w)), rel);
-  textureStore(guide_out, vec2i(p), packGuide(depth, n, g0.w, unpack4x8unorm(g0.z).x, plane));
+  let n_face = faceNormal(gbFace(g0.w));
+  let plane = dot(n_face, rel);
+  var roughness = unpack4x8unorm(g0.z).x;
+  if (wetnessActive() && !gbIsSky(g0.w) && !gbThroughWater(g0.w)) {
+    // As the lighting pass shades it (lighting.wgsl): puddles and wet roughness.
+    let at = cam.origin_frac + rel - n_face * 1e-3;
+    let cell = vec3i(floor(at));
+    let wp = wetnessAt(vec3f(cam.origin_cell) + at, cam.origin_cell + cell, n_face);
+    roughness = mix(roughness, PUDDLE_ROUGHNESS, wp.y) * mix(1.0, WET_SMOOTH, wp.x);
+    n = normalize(mix(n, n_face, wp.y));
+  }
+  textureStore(guide_out, vec2i(p), packGuide(depth, n, g0.w, roughness, plane));
   if (gbIsSky(g0.w) || params.restir_enabled == 0u || params.light_count == 0u) {
     textureStore(reservoirs_out, vec2i(p), vec4u(0u));
     return;

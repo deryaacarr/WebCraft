@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { config } from '../config';
 import { BlockId } from '../world/blocks';
-import { waterCoefficients, waterTraceDistance } from './water';
+import { waterAt, waterCoefficients, waterTraceDistance, waveHeight } from './water';
 
 describe('water', () => {
   it('WATER_ID in water.wgsl is BlockId.water', () => {
@@ -34,5 +34,19 @@ describe('water', () => {
     expect(d < w.maxDistance ? left : 0.01).toBeCloseTo(0.01, 4);
     // Murky water: shorter.
     expect(waterTraceDistance({ ...w, clarity: 0 })).toBeLessThan(d);
+  });
+
+  it('finds the camera under the wavy surface of the water column above it', () => {
+    // Water from y = 60 to 64 at every column, air above.
+    const getBlock = (_x: number, y: number) => (y >= 60 && y <= 64 ? BlockId.water : 0);
+    const surface = 64 + config.water.level;
+    const t = 3;
+    const h = waveHeight(10.5, -3.25, t);
+    expect(Math.abs(h)).toBeLessThan(0.05);
+    expect(waterAt(getBlock, 10.5, 62.2, -3.25, t)).toEqual({ under: true, surfaceY: surface });
+    // In the top voxel: under or not depending on the waves at that spot and moment.
+    expect(waterAt(getBlock, 10.5, surface + h - 1e-4, -3.25, t).under).toBe(true);
+    expect(waterAt(getBlock, 10.5, surface + h + 1e-4, -3.25, t).under).toBe(false);
+    expect(waterAt(getBlock, 10.5, 66, -3.25, t).under).toBe(false);
   });
 });

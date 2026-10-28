@@ -142,7 +142,9 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
       break;
     }
   }
-  if (q.x < 0) {
+  // Camera under water: no surface seen from above (its view of the surface from below is
+  // traced by the primary UNDERWATER pipeline).
+  if (q.x < 0 || water.camera_under != 0u) {
     textureStore(output, p, vec4f(0.0, 0.0, 0.0, -1.0));
     return;
   }

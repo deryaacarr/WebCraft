@@ -174,7 +174,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let view = rayDir(cam.inv_view_proj, uv);
   let depth = textureLoad(gdepth, px, 0).x;
   let n = faceNormal(gbFace(g.w));
-  let under = gbThroughWater(g.w);
+  var under = gbThroughWater(g.w);
   var pos = viewRelativePosition(view, cam.forward, depth);
   var n_s = vec3f(0.0, 1.0, 0.0);
   /// Height of the water surface (camera-cell frame).
@@ -183,6 +183,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   if (under) {
     w = textureLoad(gwater, px, 0);
     pos = waterBottom(view, w, water.ior);
+    // Camera under water, seen out through the surface: the hit is in the air.
+    under = w.w != WATER_EXIT;
     n_s = waterSurfaceNormal(w);
     surface_y = cam.origin_frac.y + view.y * w.x;
   }

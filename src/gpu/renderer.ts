@@ -1,4 +1,5 @@
 import { config, type DebugView } from '../config';
+import { emit } from '../core/events';
 import { setLiveContent, withoutPowerSaving } from '../core/power';
 import type { CameraFrame, FlyCamera } from '../player/camera';
 import type { GpuBrickmap } from './brickmap';
@@ -21,7 +22,7 @@ import type { FrameContext, RenderPass } from './passes/pass';
 import { PrimaryPass } from './passes/primary-pass';
 import { TopdownPass } from './passes/topdown-pass';
 import { GpuProfiler } from './profiler';
-import { WaterSystem } from './water';
+import { WaterSystem, waterAt } from './water';
 
 /** A chain of passes whose last one writes `output` (the scene texture for the blit). */
 interface SceneChain {
@@ -54,6 +55,10 @@ export class Renderer {
   private boundOutput: GPUTexture | null = null;
   private readonly primary: PrimaryPass;
   private lastCamera: CameraFrame | null = null;
+  private readonly water: WaterSystem;
+  /** World lookup (block id at x, y, z) for the camera's water state; air until set. */
+  blockAt: (x: number, y: number, z: number) => number = () => 0;
+  private cameraUnderwater = false;
 
   constructor(
     private readonly gpu: GpuContext,
@@ -68,6 +73,7 @@ export class Renderer {
     this.size = new CanvasSize(canvas, device.limits.maxTextureDimension2D);
     this.gbuffer = new GBuffer(device);
     const water = new WaterSystem(device);
+    this.water = water;
     const primary = new PrimaryPass(device, brickmap, this.gbuffer, materials, water);
     this.primary = primary;
     const camera = () => primary.camera;
@@ -131,6 +137,7 @@ export class Renderer {
     const encoder = device.createCommandEncoder({ label: 'frame' });
     const frame = camera.frame(alpha, this.gbuffer.width, this.gbuffer.height);
     this.lastCamera = frame;
+    this.updateCameraWater(frame, time);
     const dt = this.lastTime === null ? 0 : Math.max(0, time - this.lastTime);
     this.lastTime = time;
     const ctx: FrameContext = { encoder, profiler: this.profiler, time, dt, camera: frame };
@@ -147,6 +154,21 @@ export class Renderer {
     // Moving water keeps the idle frame rate up (core/power.ts).
     const w = config.water;
     setLiveContent('water', this.primary.waterVisible && w.enabled && w.waveStrength > 0 && config.wind.speed > 0);
+  }
+
+  /** Camera under the water surface (waves included): switches the primary pass to its
+   *  underwater pipeline, announces the change ("underwater" event) and keeps the idle
+   *  frame rate up (moving water all around). */
+  private updateCameraWater(frame: CameraFrame, time: number): void {
+    const [x, y, z] = [0, 1, 2].map((i) => frame.cell[i]! + frame.frac[i]!) as [number, number, number];
+    const { under, surfaceY } = waterAt(this.blockAt, x, y, z, time);
+    this.water.cameraUnder = under;
+    this.water.cameraSurface = surfaceY - frame.cell[1]!;
+    setLiveContent('underwater', under);
+    if (under !== this.cameraUnderwater) {
+      this.cameraUnderwater = under;
+      emit('underwater', { underwater: under });
+    }
   }
 
   /**

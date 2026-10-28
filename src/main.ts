@@ -4,6 +4,7 @@ import type { Vec3 } from './core/math';
 import { TimeOfDay } from './core/time-of-day';
 import { parseUrlOverrides } from './core/url-params';
 import { GameLoop } from './core/loop';
+import { on } from './core/events';
 import { initGpu, WebGPUUnsupportedError } from './gpu/device';
 import { GpuBrickmap } from './gpu/brickmap';
 import { verifyBrickmap } from './gpu/brickmap-verify';
@@ -63,6 +64,8 @@ async function main(): Promise<void> {
     defaultWorkerCount(config.generation.workers),
   );
   const streamer = new ChunkStreamer(world, pool);
+  // The renderer checks whether the camera is under water.
+  renderer.blockAt = (x, y, z) => world.getBlock(x, y, z);
 
   // Debug fly camera, spawned above the ground (or water) at the origin.
   const spawn = (): Vec3 => [
@@ -148,6 +151,8 @@ async function main(): Promise<void> {
       webcraft: {
         config, renderer, world, emitters, streamer, placeTorches, placeRocks,
         verifyTrace: () => verifyTrace(gpu.device, brickmap, world, camera.position),
+        /** Game events (core/events.ts), e.g. on('underwater', …). */
+        on,
         setCamera: (x: number, y: number, z: number, yawDeg: number, pitchDeg: number) => {
           camera = new FlyCamera([x, y, z], pitchDeg, yawDeg);
         },

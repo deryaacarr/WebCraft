@@ -28,6 +28,10 @@ export class PrimaryPass implements RenderPass {
   private pipeline!: GPUComputePipeline;
   private fixup: GPUComputePipeline | null = null;
   private fixupBindGroup: GPUBindGroup | null = null;
+  /** Camera under water: replaces the main pipeline and fix-ups (primary.wgsl UNDERWATER). */
+  private underwater!: GPUComputePipeline;
+  private underwaterGroup: GPUBindGroup | null = null;
+  private underwaterLayouts!: [GPUBindGroupLayout, GPUBindGroupLayout];
   private fixupLayouts: [GPUBindGroupLayout, GPUBindGroupLayout] | null = null;
   private flags: GPUTexture | null = null;
   /** Water surface under the waves (primary.wgsl `surface`, read by the fix-up). */
@@ -80,7 +84,7 @@ export class PrimaryPass implements RenderPass {
     const [wx, wy] = this.workgroup;
     const constants = { WORKGROUP_X: wx, WORKGROUP_Y: wy, ...traceConstants() };
     let pipelines;
-    [pipelines, this.prepassPipeline, this.surfacePipeline] = await Promise.all([
+    [pipelines, this.prepassPipeline, this.surfacePipeline, this.underwater] = await Promise.all([
       createMicroPipelines(this.device, this.name, module, constants, true),
       this.device.createComputePipelineAsync({
         label: `${this.name}-prepass`,
@@ -92,12 +96,18 @@ export class PrimaryPass implements RenderPass {
         layout: 'auto',
         compute: { module, entryPoint: 'surface', constants: { ...constants, MICRO_WALK: 1 } },
       }),
+      this.device.createComputePipelineAsync({
+        label: `${this.name}-underwater`,
+        layout: 'auto',
+        compute: { module, entryPoint: 'main', constants: { ...constants, MICRO_WALK: 1, UNDERWATER: 1 } },
+      }),
     ]);
     this.pipeline = pipelines.main;
     this.fixup = pipelines.fixup;
     this.fixupLayouts = this.fixup && [this.fixup.getBindGroupLayout(1), this.fixup.getBindGroupLayout(2)];
     this.prepassLayout = this.prepassPipeline.getBindGroupLayout(1);
     this.surfaceLayouts = [this.surfacePipeline.getBindGroupLayout(1), this.surfacePipeline.getBindGroupLayout(2)];
+    this.underwaterLayouts = [this.underwater.getBindGroupLayout(1), this.underwater.getBindGroupLayout(2)];
     this.brickmapLayout = this.pipeline.getBindGroupLayout(1);
     this.camera = this.device.createBuffer({
       label: `${this.name}-camera`,
@@ -169,6 +179,7 @@ export class PrimaryPass implements RenderPass {
       });
     this.bindGroup = entries(this.pipeline, this.flags.createView(), dummy, this.tiles, this.dummyTiles);
     this.fixupBindGroup = this.fixup && entries(this.fixup, dummy, this.flags.createView(), this.dummyTiles, this.tiles);
+    this.underwaterGroup = entries(this.underwater, dummy, this.flags.createView(), this.dummyTiles, this.tiles);
     this.surfaceGroup = this.device.createBindGroup({
       label: this.surfacePipeline.label,
       layout: this.surfacePipeline.getBindGroupLayout(0),
@@ -241,6 +252,9 @@ export class PrimaryPass implements RenderPass {
     this.materials.update(pixelTan);
     f32[59] = ((tile * Math.SQRT2) / 2) * pixelTan * config.trace.prepassConeMargin;
     f32[63] = config.trace.prepassSafety;
+    // Under water the prepass finds nothing to skip (every ray starts inside water).
+    const under = this.water.cameraUnder;
+    if (under) prepass = false;
     u32[66] = prepass ? tile : 0;
     u32[67] = config.trace.prepassMaxSteps;
     f32.set(cam.prevForward, 68);
@@ -265,11 +279,22 @@ export class PrimaryPass implements RenderPass {
       pass.setBindGroup(1, this.brickmap.bindGroup(this.prepassLayout, [0, 1]));
       pass.dispatchWorkgroups(Math.ceil(this.coarse.width / this.workgroup[0]), Math.ceil(this.coarse.height / this.workgroup[1]));
     }
+    const groups = [Math.ceil(this.gbuffer.width / this.workgroup[0]), Math.ceil(this.gbuffer.height / this.workgroup[1])] as const;
+    if (under && this.underwaterGroup) {
+      // Camera under water: every pixel through the water and out of (or mirrored at) the
+      // surface, in one pipeline of its own.
+      pass.setPipeline(this.underwater);
+      pass.setBindGroup(0, this.underwaterGroup);
+      pass.setBindGroup(1, this.brickmap.bindGroup(this.underwaterLayouts[0], GpuBrickmap.TRACE_BINDINGS));
+      pass.setBindGroup(2, this.materials.bindGroup(this.underwaterLayouts[1]));
+      pass.dispatchWorkgroups(...groups);
+      pass.end();
+      return;
+    }
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.bindGroup);
     pass.setBindGroup(1, this.brickmap.bindGroup(this.brickmapLayout, GpuBrickmap.TRACE_BINDINGS));
     pass.setBindGroup(2, this.materials.bindGroup(this.materialLayout));
-    const groups = [Math.ceil(this.gbuffer.width / this.workgroup[0]), Math.ceil(this.gbuffer.height / this.workgroup[1])] as const;
     pass.dispatchWorkgroups(...groups);
     if (this.fixup && this.fixupBindGroup && this.fixupLayouts && this.tiles && this.surfaceGroup) {
       // Water surface under the waves first (same tiles), then the fix-up.

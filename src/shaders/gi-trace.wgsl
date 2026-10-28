@@ -234,7 +234,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let seen_through = throughWater(w);
   let pos = select(viewRelativePosition(view, cam.forward, guideDepth(g)), waterBottom(view, w, water.ior), seen_through);
   let start = cam.origin_frac + pos + n_geo * SURFACE_OFFSET;
-  under_water = seen_through || getVoxel(cam.origin_cell + vec3i(floor(start))) == WATER_ID;
+  // (Seen out through the surface from under water, the hit is in the air.)
+  under_water = (seen_through && w.w != WATER_EXIT) || getVoxel(cam.origin_cell + vec3i(floor(start))) == WATER_ID;
 
   let noise0 = blueNoise(blue_noise, p, cam.frame_index, 0u);
   let noise1 = blueNoise(blue_noise, p, cam.frame_index, 1u);

@@ -512,6 +512,19 @@ export const config = {
     /** Ground beside the water darker and smoother (0 = off), within this many blocks. */
     wetShore: 1,
     wetMaxDistance: 40,
+    /** Light shafts under water (0 = off; mean-preserving, from the caustic pattern). */
+    lightShafts: 0.5,
+  },
+  /** Wetness (wetness.wgsl): darker, smoother surfaces and puddles on flat ground. The rain
+   *  system will drive `global`; for now the panel. */
+  wetness: {
+    /** Global wetness 0..1 (rain): ground open to the sky; sheltered spots stay dry. */
+    global: 0,
+    /** Puddle amount on wet flat ground (0 = none) and their size (metres). */
+    puddles: 0.6,
+    puddleScale: 2.5,
+    /** Local wet zones (at most 4): centre (world), radius (blocks), amount 0..1. */
+    zones: [] as { x: number; y: number; z: number; radius: number; amount: number }[],
   },
   /** Global wind: water waves now; rain and foliage later. Direction it blows towards
    *  (degrees, 0 = north / −Z, 90 = east / +X), speed in m/s (≈ 2: calm lake). */

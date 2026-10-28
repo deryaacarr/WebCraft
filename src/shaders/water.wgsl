@@ -4,12 +4,15 @@
 // water: Fresnel-weighted reflection + transmission, Beer-Lambert absorption and single
 // scattering along the path in water.
 //
-// gwater (rgba32float, cleared every frame), only for pixels seen through a water surface:
-//   x  distance along the camera ray to the surface (0 = not through water)
-//   y  path length in water from the surface to the bottom (the G-buffer surface); the
-//      trace distance if nothing was hit (deep water: the G-buffer says sky)
-//   z  surface normal, octahedral pack2x16snorm (u32 bits)
-//   w  unused
+// gwater (rgba32float, cleared every frame), for pixels whose ray bends at a water surface:
+//   x  distance along the camera ray to the surface (0 = no bend)
+//   y  path length after the bend to the G-buffer surface; the trace distance if nothing
+//      was hit (the G-buffer says sky)
+//   z  surface normal (pointing out of the water), octahedral pack2x16snorm (u32 bits)
+//   w  WATER_FROM_AIR: camera above, refracted into the water; camera under water
+//      (primary UNDERWATER pipeline): WATER_EXIT refracted out into the air, WATER_TIR
+//      mirrored back down (total internal reflection); WATER_FOG: no bend and nothing
+//      hit within the trace distance (x = 0, y = that distance).
 // The G-buffer depth of such a pixel is where the camera ray meets the plane of the hit
 // face (exact plane coordinates for the denoisers, continuous across a face); rays that
 // start at the surface (shadow, GI) take the true bottom position from waterBottom.
@@ -17,6 +20,11 @@
 
 /// BlockId.water (src/world/blocks.ts; a test checks they match).
 const WATER_ID: u32 = 7u;
+
+const WATER_FROM_AIR: f32 = 0.0;
+const WATER_EXIT: f32 = 1.0;
+const WATER_TIR: f32 = 2.0;
+const WATER_FOG: f32 = 3.0;
 
 struct WaterParams {
   /// Absorption and scattering coefficients per block (metre), linear rgb. Extinction is
@@ -64,6 +72,22 @@ struct WaterParams {
   wet_max_distance: f32,
   _pad3: f32,
   _pad4: f32,
+  /// Camera under water (Aşama 9e; primary UNDERWATER pipeline): 1 / 0, and the rest level
+  /// of the surface above it (camera-cell frame, y).
+  camera_under: u32,
+  camera_surface: f32,
+  /// Wetness (wetness.wgsl): global (rain: up-facing ground open to the sky), puddle
+  /// amount, puddle size (metres), local zones in use.
+  wet_global: f32,
+  puddles: f32,
+  puddle_scale: f32,
+  zone_count: u32,
+  /// Light shafts under water (0 = off).
+  light_shafts: f32,
+  _pad5: f32,
+  /// Local wet zones: centre (absolute xyz) and radius; their amounts.
+  zones: array<vec4f, 4>,
+  zone_amount: vec4f,
 };
 
 fn waterMeanScattering(w: WaterParams) -> f32 {
@@ -82,14 +106,32 @@ fn waterSurfaceNormal(g: vec4f) -> vec3f {
   return octDecode(unpack2x16snorm(bitcast<u32>(g.z)));
 }
 
-fn packWaterSample(surface_t: f32, path: f32, normal: vec3f) -> vec4f {
-  return vec4f(surface_t, path, bitcast<f32>(pack2x16snorm(octEncode(normal))), 0.0);
+fn packWaterSample(surface_t: f32, path: f32, normal: vec3f, kind: f32) -> vec4f {
+  return vec4f(surface_t, path, bitcast<f32>(pack2x16snorm(octEncode(normal))), kind);
 }
 
-/// Camera-relative position of the bottom seen through the water at view direction `view`.
+/// Direction of the ray after its bend at the surface (see gwater).
+fn waterBentDir(view: vec3f, g: vec4f, ior: f32) -> vec3f {
+  let n = waterSurfaceNormal(g);
+  if (g.w == WATER_FROM_AIR) {
+    return refract(view, n, 1.0 / ior);
+  }
+  if (g.w == WATER_EXIT) {
+    // Right at the critical angle the packed normal can put the ray just beyond it: it
+    // leaves along the surface then (a zero direction made NaNs, a mirrored one sampled the
+    // sky below the horizon — black lines along the edge of Snell's window).
+    let out_dir = refract(view, -n, ior);
+    if (all(out_dir == vec3f(0.0))) {
+      return normalize(view - n * dot(view, n) + n * 1e-3);
+    }
+    return out_dir;
+  }
+  return reflect(view, -n);
+}
+
+/// Camera-relative position of what is seen at view direction `view` behind a bend.
 fn waterBottom(view: vec3f, g: vec4f, ior: f32) -> vec3f {
-  let d = refract(view, waterSurfaceNormal(g), 1.0 / ior);
-  return view * g.x + d * g.y;
+  return view * g.x + waterBentDir(view, g, ior) * g.y;
 }
 
 /// Direction towards the light from under a surface with normal `n` (pointing out of the

@@ -13,9 +13,6 @@ const CAUSTIC_MEAN: f32 = 0.25;
 /// Caustics: pattern size (metres) and the depth (metres) over which they blur out.
 const CAUSTIC_SIZE: f32 = 0.35;
 const CAUSTIC_FADE_DEPTH: f32 = 4.0;
-/// Wet ground: albedo and roughness multipliers when fully wet.
-const WET_DARKEN: f32 = 0.6;
-const WET_SMOOTH: f32 = 0.8;
 
 struct WaterMedium {
   /// σ_t per metre (absorption + scattering), linear rgb.

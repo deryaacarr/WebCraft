@@ -281,6 +281,7 @@ export class GiPass implements RenderPass {
           [5, v(t.guide[c]!)], [6, v(t.guide[prev]!)],
           [7, v(t.reservoirs[prev]!)], [8, v(t.reservoirsInitial)],
           [9, { buffer: this.lights }], [10, { buffer: this.blockRadiance }],
+          [13, { buffer: this.water.params }],
         ]),
       ),
       spatial: byParity((c) =>

@@ -19,6 +19,7 @@
 #include "material.wgsl"
 #include "water.wgsl"
 #include "water-shore.wgsl"
+#include "wetness.wgsl"
 
 struct LightingParams {
   /// 0 lit, 1 shadow (sun visibility), 2 sky visibility, 3 history length, 4 indirect
@@ -55,6 +56,11 @@ struct LightingParams {
 
 override WORKGROUP_X: u32 = 8u;
 override WORKGROUP_Y: u32 = 8u;
+/// Pipeline variants (lighting-pass.ts picks one per frame): the underwater view and wet
+/// surfaces are compiled in only where used — present but idle, their code cost the
+/// above-water, dry pipeline ~0.5 ms (register pressure).
+override UNDERWATER_VIEW: bool = false;
+override WET_SURFACES: bool = false;
 const F0_DIELECTRIC: f32 = 0.04;
 const MIN_ROUGHNESS: f32 = 0.03;
 /// World units (blocks) are metres; the atmosphere works in km.
@@ -86,6 +92,9 @@ const WATER_DIFFUSE_PATH: f32 = 1.2;
 /// Fresnel reflectance of the water surface averaged over a uniform sky (light lost to
 /// reflection before it can enter the water).
 const WATER_SKY_FRESNEL: f32 = 0.066;
+/// Light shafts: samples along the view path, and how far along it (metres).
+const LIGHT_SHAFT_SAMPLES: i32 = 4;
+const LIGHT_SHAFT_REACH: f32 = 12.0;
 
 struct GiSample {
   diffuse: vec3f,
@@ -271,6 +280,57 @@ fn waterComposite(px: vec2i, view: vec3f, w: vec4f, bottom: vec3f, sun_vis: f32,
   return mix(water_color, FOAM_ALBEDO / PI * e * preExposure(), foam);
 }
 
+/// Light shafts under water: the caustic pattern on the surface where the refracted sun
+/// reaching each of a few points along the view path came through (bright where the waves
+/// focus it), averaged; 1 = none. `surface_y`: surface height (camera-relative).
+fn lightShafts(view: vec3f, path: f32, surface_y: f32, l_w: vec3f) -> f32 {
+  if (water.light_shafts <= 0.0 || l_w.y <= 0.0) {
+    return 1.0;
+  }
+  let reach = min(path, LIGHT_SHAFT_REACH);
+  var sum = 0.0;
+  for (var i = 0; i < LIGHT_SHAFT_SAMPLES; i++) {
+    let p = view * reach * (f32(i) + 0.5) / f32(LIGHT_SHAFT_SAMPLES);
+    let up = max(surface_y - p.y, 0.0);
+    let at_surface = vec2f(cam.origin_cell.xz) + cam.origin_frac.xz + p.xz + l_w.xz / l_w.y * up;
+    // The pattern blurs out with the distance the light travelled below the surface.
+    sum += waterCaustics(at_surface, up, water.time);
+  }
+  return mix(1.0, sum / f32(LIGHT_SHAFT_SAMPLES), water.light_shafts);
+}
+
+/// Camera under water: what is seen (`behind`, pre-exposed: a surface lit as usual, the air
+/// through Snell's window, or nothing) through `path` metres of water — Beer-Lambert
+/// absorption and single scattering of the refracted sun (with light shafts) and the sky
+/// light at the mean depth of the path. `exit`: the ray left through the surface (Fresnel
+/// transmission from below, the reflected part is the water's own glow). `camera_depth`:
+/// the surface above the camera (camera-relative y).
+fn underwaterComposite(view: vec3f, w: vec4f, behind: vec3f, path: f32, exit: bool, camera_depth: f32) -> vec3f {
+  let up_path = select(view.y * path, camera_depth, exit);
+  let mean_depth = max(camera_depth - 0.5 * up_path, 0.0);
+  let medium = waterMedium(mean_depth);
+  let sigma_t = medium.extinction;
+  let t_view = exp(-sigma_t * path);
+  var e = lighting.sky_irradiance * (1.0 - WATER_SKY_FRESNEL) * WATER_DIFFUSE_PATH * exp(-sigma_t * mean_depth * WATER_DIFFUSE_PATH);
+  let up = vec3f(0.0, 1.0, 0.0);
+  let cos_l = sky.light_dir.y;
+  if (cos_l > 0.0) {
+    let l_w = waterLightDir(sky.light_dir, up, water.ior);
+    let mu_l = max(l_w.y, 1e-3);
+    let sun = lighting.light_illuminance * (1.0 - fresnelDielectric(cos_l, water.ior)) * cos_l / mu_l * exp(-sigma_t * mean_depth / mu_l);
+    e += sun * lightShafts(view, path, camera_depth, l_w);
+  }
+  // Light scattered towards the eye along the path (constant depth: (1 − T) / σ_t).
+  let glow = medium.scatter / (4.0 * PI) * e * (1.0 - t_view) / max(sigma_t, vec3f(1e-6)) * preExposure();
+  var through = behind;
+  if (exit) {
+    // From below, the surface transmits (1 − F); the rest reflects the water's own glow.
+    let f = fresnelDielectric(dot(view, waterSurfaceNormal(w)), 1.0 / water.ior);
+    through = mix(behind, glow / max(1.0 - t_view, vec3f(1e-3)), f);
+  }
+  return through * t_view + glow;
+}
+
 fn ggxD(n_h: f32, a2: f32) -> f32 {
   let d = n_h * n_h * (a2 - 1.0) + 1.0;
   return a2 / (PI * d * d);
@@ -319,18 +379,33 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     textureStore(output, px, vec4f(select(vec3f(v), vec3f(0.0), gbIsSky(g.w)), 1.0));
     return;
   }
-  // Seen through water (primary.wgsl only flags it while water is on): the bottom, or
-  // nothing within the trace distance (deep water, flagged as sky).
+  // Seen across a water surface (primary.wgsl only flags it while water is on): from the
+  // air the bottom, or nothing within the trace distance (deep water, flagged as sky); with
+  // the camera under water (its own primary pipeline) the air through Snell's window, or
+  // the water mirrored by total internal reflection.
   let under = gbThroughWater(g.w);
-  if (gbIsSky(g.w) && !under) {
+  let cam_under = UNDERWATER_VIEW && water.camera_under != 0u;
+  if (gbIsSky(g.w) && !under && !cam_under) {
     textureStore(output, px, vec4f(skyRadiance(view), 1.0));
     return;
   }
   var wsample = vec4f(0.0);
-  if (under) {
+  if (under || cam_under) {
     wsample = textureLoad(gwater, px, 0);
   }
+  /// Left the water through the surface (camera under water): seen in the air.
+  let exit = under && wsample.w == WATER_EXIT;
+  /// Surface height (camera-relative y): where the ray bent, or above the camera.
+  let surface_y = select(view.y * wsample.x, water.camera_surface - cam.origin_frac.y, cam_under && !under);
   var result = vec3f(0.0);
+  if (gbIsSky(g.w) && exit) {
+    // The sky through Snell's window.
+    result = skyRadiance(waterBentDir(view, wsample, water.ior));
+  }
+  /// Path of the view ray in water (camera under water); for surfaces set below. Nothing
+  /// hit: the trace distance (fog), to the surface (out into the sky), or all of it after a
+  /// total reflection.
+  var water_path = select(wsample.y, select(wsample.x + wsample.y, wsample.x, exit), under);
   var sun_vis = 1.0;
   /// Water above the bottom (metres); deep water (no bottom hit): from the path length.
   var water_depth = wsample.y * 0.7;
@@ -346,16 +421,33 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     worn.roughness = surf.x;
     let face_id = gbFace(g.w);
     let depth = textureLoad(gdepth, px, 0).x;
-    // Seen through water: the true bottom position and the refracted view ray.
+    // Across a water surface: the true position behind the bend.
     let pos = select(viewRelativePosition(view, cam.forward, depth), waterBottom(view, wsample, water.ior), under);
+    water_path = select(length(pos), select(wsample.x + wsample.y, wsample.x, exit), under);
+    /// The surface lies under water: light reaches it through the surface.
+    let submerged = (under && !exit) || (cam_under && !under && pos.y < surface_y);
     let rel = cam.origin_frac + pos - faceNormal(face_id) * 1e-3;
     let cell_rel = vec3i(floor(rel));
     let dist = select(depth / max(dot(view, cam.forward), 1e-4), wsample.x + wsample.y, under);
     let mat_flags = materials[gbMaterial(g.w)].flags;
     applyBevel(&worn, mat_flags, cam.origin_cell + cell_rel, face_id, rel - vec3f(cell_rel), dist);
-    if (!under && (mat_flags & MATERIAL_NATURAL) != 0u) {
-      // Ground beside the water is wet.
-      applyWetness(&worn, shoreWetness(cam.origin_cell + cell_rel, dist));
+    if (!submerged) {
+      // Ground beside the water is wet; rain (global) and local zones wet anything, with
+      // puddles on flat ground (smooth, flat water film; GI traced their reflections).
+      // (An `if`, not select(): select evaluates both sides — the probes then ran for every
+      // pixel, ~0.5 ms.)
+      var wet = 0.0;
+      if ((mat_flags & MATERIAL_NATURAL) != 0u) {
+        wet = shoreWetness(cam.origin_cell + cell_rel, dist);
+      }
+      if (WET_SURFACES && wetnessActive() && (mat_flags & MATERIAL_ALPHA_TEST) == 0u) {
+        let wp = wetnessAt(vec3f(cam.origin_cell) + rel, cam.origin_cell + cell_rel, faceNormal(face_id));
+        wet = max(wet, wp.x);
+        worn.albedo *= mix(1.0, PUDDLE_DARKEN, wp.y);
+        worn.roughness = mix(worn.roughness, PUDDLE_ROUGHNESS, wp.y);
+        worn.normal = normalize(mix(worn.normal, faceNormal(face_id), wp.y));
+      }
+      applyWetness(&worn, wet);
     }
     let albedo = worn.albedo;
     let n = worn.normal;
@@ -363,15 +455,14 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     let metal = surf.y;
     let a2 = roughness * roughness * roughness * roughness;
 
-    var v = -view;
+    var v = select(-view, -waterBentDir(view, wsample, water.ior), under);
     var l = sky.light_dir;
     // Light reaching a bottom under water (1 elsewhere): direct and indirect.
     var att_direct = vec3f(1.0);
     var att_indirect = vec3f(1.0);
-    if (under) {
-      let n_s = waterSurfaceNormal(wsample);
-      v = -refract(view, n_s, 1.0 / water.ior);
-      water_depth = max(view.y * wsample.x - pos.y, 0.0);
+    if (submerged) {
+      let n_s = select(vec3f(0.0, 1.0, 0.0), waterSurfaceNormal(wsample), under);
+      water_depth = max(surface_y - pos.y, 0.0);
       let sigma_t = waterMedium(water_depth).extinction;
       let cos_l = dot(sky.light_dir, n_s);
       l = waterLightDir(sky.light_dir, n_s, water.ior);
@@ -420,7 +511,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
       let gi = giUpsample(px, cam.size, textureLoad(gdepth, px, 0).x, gbFace(g.w));
       let f_env = envBrdf(f0, roughness, n_v);
       // Smooth surfaces traced their specular lobe; rough ones take it from the irradiance.
-      let smooth_spec = specularProbability(surf.x, params.gi_spec_threshold) > 0.0;
+      let smooth_spec = specularProbability(worn.roughness, params.gi_spec_threshold) > 0.0;
       let spec_in = select((gi.diffuse + gi.emissive * flick) / PI, gi.specular, smooth_spec);
       // Emissive light flickers here (it was accumulated and denoised without flicker).
       let e_diffuse = gi.diffuse + gi.emissive * flick;
@@ -447,10 +538,14 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     result += indirect;
     sun_vis = vis.x;
   }
-  if (under && params.mode == 0u) {
-    result = waterComposite(px, view, wsample, result, sun_vis, water_depth);
+  if (params.mode == 0u) {
+    if (cam_under) {
+      result = underwaterComposite(view, wsample, result, water_path, exit, water.camera_surface - cam.origin_frac.y);
+    } else if (under) {
+      result = waterComposite(px, view, wsample, result, sun_vis, water_depth);
+    }
   }
-  if (params.aerial_enabled != 0u) {
+  if (params.aerial_enabled != 0u && !cam_under) {
     let air_depth = select(textureLoad(gdepth, px, 0).x, wsample.x * dot(view, cam.forward), under);
     let air = aerialPerspective(uv, air_depth);
     result = result * air.a + air.rgb;
