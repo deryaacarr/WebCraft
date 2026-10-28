@@ -25,10 +25,15 @@ export async function initGpu(canvas: HTMLCanvasElement): Promise<GpuContext> {
 
   const requiredFeatures = OPTIONAL_FEATURES.filter((f) => adapter.features.has(f));
   // The brick pool is one large storage buffer: ask for everything the adapter offers.
+  // The primary pass writes five storage textures (G-buffer, water samples, fix-up flags).
   const requiredLimits = {
     maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
     maxBufferSize: adapter.limits.maxBufferSize,
+    maxStorageTexturesPerShaderStage: adapter.limits.maxStorageTexturesPerShaderStage,
   };
+  if (adapter.limits.maxStorageTexturesPerShaderStage < 5) {
+    throw new WebGPUUnsupportedError('GPU en az 5 storage texture (shader aşaması başına) desteklemiyor.');
+  }
   const device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
 
   device.addEventListener('uncapturederror', (event) => {

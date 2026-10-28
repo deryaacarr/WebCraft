@@ -20,6 +20,7 @@ import type { FrameContext, RenderPass } from './passes/pass';
 import { PrimaryPass } from './passes/primary-pass';
 import { TopdownPass } from './passes/topdown-pass';
 import { GpuProfiler } from './profiler';
+import { WaterSystem } from './water';
 
 /** A chain of passes whose last one writes `output` (the scene texture for the blit). */
 interface SceneChain {
@@ -64,14 +65,15 @@ export class Renderer {
     this.profiler = new GpuProfiler(device, gpu.timestampQuery);
     this.size = new CanvasSize(canvas, device.limits.maxTextureDimension2D);
     this.gbuffer = new GBuffer(device);
-    const primary = new PrimaryPass(device, brickmap, this.gbuffer, materials);
+    const water = new WaterSystem(device);
+    const primary = new PrimaryPass(device, brickmap, this.gbuffer, materials, water);
     this.primary = primary;
     const camera = () => primary.camera;
-    const visibility = new VisibilityPass(device, this.gbuffer, camera, brickmap, materials, sky);
+    const visibility = new VisibilityPass(device, this.gbuffer, camera, brickmap, materials, sky, water);
     // Last frame's lit image, for GI screen reuse (the lighting pass runs after GI).
-    const gi = new GiPass(device, this.gbuffer, camera, brickmap, materials, sky, emitters, () => this.lighting?.output ?? null);
+    const gi = new GiPass(device, this.gbuffer, camera, brickmap, materials, sky, emitters, () => this.lighting?.output ?? null, water);
     const aerial = new AerialPerspectivePass(device, camera, sky);
-    const lighting = new LightingPass(device, this.gbuffer, camera, visibility, sky, aerial, gi, brickmap, materials);
+    const lighting = new LightingPass(device, this.gbuffer, camera, visibility, sky, aerial, gi, brickmap, materials, water);
     this.visibility = visibility;
     this.lighting = lighting;
     this.gi = gi;

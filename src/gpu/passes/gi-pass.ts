@@ -9,6 +9,7 @@ import { createShaderModule } from '../shader';
 import type { SkySystem } from '../sky';
 import { createMicroFlags, createMicroPipelines, microFlagDummy } from '../micro-fixup';
 import { traceConstants } from '../trace-constants';
+import type { WaterSystem } from '../water';
 import type { FrameContext, RenderPass } from './pass';
 
 // GiParams in gi-common.wgsl: 32 scalars.
@@ -88,6 +89,7 @@ export class GiPass implements RenderPass {
     private readonly emitters: EmitterRegistry,
     /** Last frame's lit image (screen-space reuse of bounce hits). */
     private readonly prevLit: () => GPUTexture | null,
+    private readonly water: WaterSystem,
   ) {
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
     this.params = device.createBuffer({ label: 'gi-params', size: PARAMS_SIZE, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -350,6 +352,8 @@ export class GiPass implements RenderPass {
           { binding: 12, resource: t.rawEmissive.createView() },
           { binding: 13, resource: flagOut },
           { binding: 14, resource: flagIn },
+          { binding: 15, resource: g.water!.createView() },
+          { binding: 16, resource: { buffer: this.water.params } },
         ],
       });
     this.groups!.trace = [0, 1].map((c) => make(this.pipelines.trace, c, t.microFlags.createView(), dummy));

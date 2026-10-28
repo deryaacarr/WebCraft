@@ -90,6 +90,11 @@ const MAX_SHAPED_CROSSINGS: u32 = 8u;
 /// Fix-up pipelines: resolve shaped blocks on their micro grid (see the top of this file).
 override MICRO_WALK: bool = false;
 
+/// Fix-up pipelines only: uniform bricks of this block id are crossed like empty space
+/// (0 = none). The primary fix-up sets it to water while tracing under a water surface —
+/// walking a deep lake voxel by voxel cost ~2.5 ms.
+var<private> trace_skip_id: u32 = 0u;
+
 // Every shader that includes this file defines
 //   fn traceOpaque(id: u32, cell: vec3i, normal: vec3i, local: vec3f, t: f32, dir: vec3f) -> bool
 // which decides whether a non-air voxel stops the ray at this point (alpha-tested leaves
@@ -231,6 +236,23 @@ fn traceBlocks(origin_cell: vec3i, origin_frac: vec3f, dir: vec3f, t_min: f32, r
         // Uniform brick: the entry voxel is the hit, unless it is see-through there; then
         // walk it voxel by voxel like a fully occupied mixed brick.
         let id = ptr & BRICK_UNIFORM_ID_MASK;
+        if (MICRO_WALK && id == trace_skip_id) {
+          // See-through as a whole: leave the brick in one step, like an empty one.
+          let t_box = boundaryT(bmin, bs, step_pos, origin_cell, origin_frac, inv);
+          let a = minAxis(t_box);
+          t = t_box[a];
+          if (t >= t_exit) {
+            break;
+          }
+          let hi = bmin + vec3i(bs - 1);
+          c = clamp(origin_cell + vec3i(floor(origin_frac + dir * t)), bmin, hi);
+          c[a] = select(bmin[a] - 1, hi[a] + 1, step[a] > 0);
+          b = brickCoord(c);
+          normal = vec3i(0);
+          normal[a] = -step[a];
+          in_brick = false;
+          continue;
+        }
         if (traceOpaque(id, c, normal, origin_frac + dir * t - vec3f(c - origin_cell), t, dir)) {
           r.hit = true;
           r.cell = c;

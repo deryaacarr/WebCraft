@@ -5,6 +5,7 @@ import { createShaderModule } from '../shader';
 import type { MaterialSystem } from '../materials';
 import { clearMicroFlags, createMicroFlags, createMicroPipelines, microFlagDummy } from '../micro-fixup';
 import { traceConstants } from '../trace-constants';
+import type { WaterSystem } from '../water';
 import type { FrameContext, RenderPass } from './pass';
 
 // Camera struct in camera.wgsl: 3 × mat4x4f (192 B) + 6 × 16 B.
@@ -16,7 +17,8 @@ const TILE_HEADER = 4;
 /**
  * Traces one ray per pixel through the brickmap and fills the G-buffer. A depth prepass
  * at 1/prepassTile resolution first finds, per tile, how far all its rays can safely skip.
- * Pixels whose ray stopped at a shaped block are redone by a fix-up pipeline (micro-fixup.ts).
+ * Pixels whose ray stopped at a shaped block or water are redone by a fix-up pipeline
+ * (micro-fixup.ts; water: refraction to the bottom, water.wgsl).
  */
 export class PrimaryPass implements RenderPass {
   readonly name = 'primary';
@@ -48,6 +50,7 @@ export class PrimaryPass implements RenderPass {
     private readonly brickmap: GpuBrickmap,
     private readonly gbuffer: GBuffer,
     private readonly materials: MaterialSystem,
+    private readonly water: WaterSystem,
   ) {
     this.dummyTiles = device.createBuffer({ label: `${this.name}-micro-tiles-dummy`, size: 16, usage: GPUBufferUsage.STORAGE });
   }
@@ -61,7 +64,7 @@ export class PrimaryPass implements RenderPass {
     const constants = { WORKGROUP_X: wx, WORKGROUP_Y: wy, ...traceConstants() };
     let pipelines;
     [pipelines, this.prepassPipeline] = await Promise.all([
-      createMicroPipelines(this.device, this.name, module, constants),
+      createMicroPipelines(this.device, this.name, module, constants, true),
       this.device.createComputePipelineAsync({
         label: `${this.name}-prepass`,
         layout: 'auto',
@@ -84,7 +87,7 @@ export class PrimaryPass implements RenderPass {
 
   resize(width: number, height: number): void {
     const g = this.gbuffer;
-    if (!g.gbuffer0 || !g.depth || !g.motion) return;
+    if (!g.gbuffer0 || !g.depth || !g.motion || !g.water) return;
     const tile = config.trace.prepassTile;
     this.coarse?.destroy();
     this.coarse = this.device.createTexture({
@@ -128,6 +131,8 @@ export class PrimaryPass implements RenderPass {
           { binding: 6, resource: flagIn },
           { binding: 7, resource: { buffer: tilesRw } },
           { binding: 8, resource: { buffer: tilesRead } },
+          { binding: 9, resource: g.water!.createView() },
+          { binding: 10, resource: { buffer: this.water.params } },
         ],
       });
     this.bindGroup = entries(this.pipeline, this.flags.createView(), dummy, this.tiles, this.dummyTiles);
@@ -169,10 +174,12 @@ export class PrimaryPass implements RenderPass {
     f32.set(cam.prevForward, 68);
     u32[71] = cam.frameIndex;
     this.device.queue.writeBuffer(this.camera, 0, this.cameraData);
+    this.water.update();
 
-    // Only pixels that hit a shaped block write a flag.
+    // Only pixels that hit a shaped block or water write a flag (and a water sample).
     if (this.fixup && this.flags && this.tiles) {
       clearMicroFlags(ctx.encoder, this.flags);
+      clearMicroFlags(ctx.encoder, this.gbuffer.water!);
       ctx.encoder.clearBuffer(this.tiles, 0, 4);
       ctx.encoder.clearBuffer(this.tiles, TILE_HEADER * 4, this.tileCount * 4);
     }

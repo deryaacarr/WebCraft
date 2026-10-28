@@ -17,11 +17,17 @@
 // Shaped blocks (trace.wgsl MICRO_WALK): the main pipeline flags pixels where either ray
 // stopped at one (cubes there); the fix-up pipeline recomputes just those pixels, with the
 // same random numbers, on the micro grid.
+//
+// Water lets the rays through (it is a medium, not a surface; its absorption is applied
+// when shading). Pixels seen through water (water.wgsl) start at the true bottom position;
+// their shadow ray leaves the water along the refracted light direction, then goes on
+// towards the light from the surface, and its light cone widens with depth and scattering.
 #include "trace.wgsl"
 #include "gbuffer.wgsl"
 #include "camera.wgsl"
 #include "material.wgsl"
 #include "sky.wgsl"
+#include "water.wgsl"
 
 struct VisibilityParams {
   shadow_distance: f32,
@@ -67,8 +73,13 @@ const SURFACE_OFFSET: f32 = 1e-3;
 /// Fix-up flags (see primary.wgsl): main pipeline writes, fix-up reads.
 @group(0) @binding(5) var micro_flag_out: texture_storage_2d<r32uint, write>;
 @group(0) @binding(6) var micro_flag_in: texture_2d<u32>;
+@group(0) @binding(7) var gwater: texture_2d<f32>;
+@group(0) @binding(8) var<uniform> water: WaterParams;
 
 fn traceOpaque(id: u32, cell: vec3i, normal: vec3i, local: vec3f, t: f32, dir: vec3f) -> bool {
+  if (id == WATER_ID && water.enabled != 0u) {
+    return false;
+  }
   let inside = all(normal == vec3i(0));
   let face = select(faceIndex(normal), 2u, inside);
   let material = faceMaterial(id, face);
@@ -163,19 +174,65 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let view = rayDir(cam.inv_view_proj, uv);
   let depth = textureLoad(gdepth, px, 0).x;
   let n = faceNormal(gbFace(g.w));
-  let start = cam.origin_frac + viewRelativePosition(view, cam.forward, depth) + n * SURFACE_OFFSET;
+  let under = gbThroughWater(g.w);
+  var pos = viewRelativePosition(view, cam.forward, depth);
+  var n_s = vec3f(0.0, 1.0, 0.0);
+  /// Height of the water surface (camera-cell frame).
+  var surface_y = 0.0;
+  var w = vec4f(0.0);
+  if (under) {
+    w = textureLoad(gwater, px, 0);
+    pos = waterBottom(view, w, water.ior);
+    n_s = waterSurfaceNormal(w);
+    surface_y = cam.origin_frac.y + view.y * w.x;
+  }
+  let start = cam.origin_frac + pos + n * SURFACE_OFFSET;
 
   // Shadow ray: uniform point on the light's disk (a cone of half-angle light_radius).
   var sun = 0.0;
-  if (dot(n, sky.light_dir) > 0.0) {
-    let r = random2(gid.xy, cam.frame_index, 0u);
-    let cos_max = cos(sky.light_radius);
-    let cos_t = mix(1.0, cos_max, r.x);
-    let sin_t = sqrt(max(1.0 - cos_t * cos_t, 0.0));
-    let phi = 2.0 * PI * r.y;
-    let l = basis(sky.light_dir) * vec3f(sin_t * cos(phi), sin_t * sin(phi), cos_t);
+  let r = random2(gid.xy, cam.frame_index, 0u);
+  let cos_max = cos(sky.light_radius);
+  let cos_t = mix(1.0, cos_max, r.x);
+  let sin_t = sqrt(max(1.0 - cos_t * cos_t, 0.0));
+  let phi = 2.0 * PI * r.y;
+  var l = basis(sky.light_dir) * vec3f(sin_t * cos(phi), sin_t * sin(phi), cos_t);
+  var dir = l;
+  var dist = params.shadow_distance;
+  if (under) {
+    // Under water: up along the refracted light direction to the surface, then (second
+    // segment) on towards the light in air. Scattering in the water spreads where the light
+    // came through the surface over a disk growing with depth (soft shadows on the bottom
+    // of turbid water — the blur depends on the water depth only, not on how far the
+    // occluder is).
+    let l_w = waterLightDir(l, n_s, water.ior);
+    let up = max(surface_y - start.y, 0.0);
+    let exit = start + l_w * (up / max(dot(l_w, n_s), 1e-3));
+    let q = random2(gid.xy, cam.frame_index, 2u);
+    let spread = water.shadow_blur * waterMeanScattering(water) * up * up;
+    let b = basis(n_s);
+    let jitter = (b[0] * cos(2.0 * PI * q.y) + b[1] * sin(2.0 * PI * q.y)) * sqrt(q.x) * spread;
+    let to_exit = exit + jitter - start;
+    dist = length(to_exit);
+    dir = select(l_w, to_exit / max(dist, 1e-6), dist > 1e-6);
+    if (dot(l_w, n_s) <= 0.0) {
+      dir = vec3f(0.0); // the light is below the horizon
+    }
+  }
+  if (dot(n, dir) > 0.0) {
     sky_ray = 0u;
-    sun = transmittance(start, l, params.shadow_distance, params.max_steps);
+    var origin = start;
+    // A dynamic segment count, so the loop (and the traversal in it) is not unrolled.
+    let segments = select(1u, 2u, under);
+    sun = 1.0;
+    for (var k = 0u; k < segments; k++) {
+      sun *= transmittance(origin, dir, dist, params.max_steps);
+      if (sun <= 0.0 || k + 1u == segments) {
+        break;
+      }
+      origin += dir * dist;
+      dir = l;
+      dist = params.shadow_distance;
+    }
   }
 
   // Sky ray: cosine-weighted around the face normal.

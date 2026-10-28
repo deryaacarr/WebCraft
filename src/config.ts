@@ -430,6 +430,35 @@ export const config = {
       bounceIsotropic: 0.1,
     },
   },
+  /** Water as a transparent medium (water.wgsl): reflection + refraction, absorption and
+   *  scattering in the water, shadows on the bottom. */
+  water: {
+    /** Off: water is drawn as an opaque block (the old look). */
+    enabled: true,
+    ior: 1.333,
+    /** Colour of light after `absorptionDistance` metres of water (Beer-Lambert absorption,
+     *  linear rgb): red goes first, so shallow water is clear / turquoise and deep water
+     *  blue-green to dark blue. */
+    absorptionColor: [0.3, 0.79, 0.87] as [number, number, number],
+    absorptionDistance: 4,
+    /** 1 = clear, 0 = murky: scattering per metre from `maxScattering` (murky) down to
+     *  `minScattering` (clear). Default: a clear mountain lake — the bottom sharp at 1–2 m,
+     *  clearly faded at 3–4 m, lost in the water's colour beyond ~5 m. */
+    clarity: 0.9,
+    minScattering: 0.05,
+    maxScattering: 1.2,
+    /** The water's own colour: share of scattered light the particles do not absorb
+     *  (linear rgb; blue-green). */
+    scatterColor: [0.2, 0.8, 0.6] as [number, number, number],
+    /** Refracted rays stop after this many metres in water (deep water beyond). */
+    maxDistance: 48,
+    /** Softer shadows on the bottom of turbid water: light reaching depth d came through
+     *  the surface within a disk of radius shadowBlur · scattering · d² (metres). */
+    shadowBlur: 0.5,
+    /** The bottom's detail blurs with the path through water: texture footprint grows by
+     *  detailBlur · scattering · path² (metres). */
+    detailBlur: 0.05,
+  },
   /** Global illumination: half-resolution path tracing (1 bounce), ReSTIR DI for emissive
    *  blocks, SVGF denoising. Replaces the approximate sky-ambient term when enabled. */
   gi: {

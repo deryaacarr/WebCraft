@@ -3,6 +3,12 @@
 // (gi-denoise.wgsl) upsampled with depth / face awareness; with GI off, the approximate
 // sky ambient scaled by sky visibility. Sky pixels show the atmosphere, sun, moon and
 // stars. Output is pre-exposed HDR (see sky.wgsl).
+//
+// Pixels seen through water (water.wgsl): the G-buffer holds the bottom, lit as usual but
+// with the light attenuated on its way down through the water (refracted sun: Fresnel
+// transmission and Beer-Lambert along its path; indirect light along a mean diffuse path).
+// waterComposite then adds the water itself: Fresnel reflection, absorption along the view
+// path and single scattering of sun and sky light in it. The surface has no albedo.
 #include "gbuffer.wgsl"
 #include "camera.wgsl"
 #include "sky.wgsl"
@@ -11,6 +17,7 @@
 // Worn edges (applyBevel) are shaded here rather than in the primary pass: in the
 // traversal shader the extra code cost ~0.5 ms through register pressure alone.
 #include "material.wgsl"
+#include "water.wgsl"
 
 struct LightingParams {
   /// 0 lit, 1 shadow (sun visibility), 2 sky visibility, 3 history length, 4 indirect
@@ -66,6 +73,15 @@ const KM_PER_UNIT: f32 = 0.001;
 @group(0) @binding(10) var gi_emissive: texture_2d<f32>;
 /// Emitted radiance per block id: rgb = mean over a face, a = emissive coverage of it.
 @group(0) @binding(11) var<storage, read> block_radiance: array<vec4f>;
+@group(0) @binding(12) var gwater: texture_2d<f32>;
+@group(0) @binding(13) var<uniform> water: WaterParams;
+
+/// Mean path length of diffuse (sky and bounce) light per metre of depth under water: it
+/// arrives within Snell's window, mostly steeply.
+const WATER_DIFFUSE_PATH: f32 = 1.2;
+/// Fresnel reflectance of the water surface averaged over a uniform sky (light lost to
+/// reflection before it can enter the water).
+const WATER_SKY_FRESNEL: f32 = 0.066;
 
 struct GiSample {
   diffuse: vec3f,
@@ -168,6 +184,41 @@ fn envBrdf(f0: vec3f, roughness: f32, n_v: f32) -> vec3f {
   return f0 * ab.x + ab.y;
 }
 
+/// ∫₀^path exp(−a·s) ds per channel, a = σ_t · (1 + k): light scattered along a view path
+/// whose depth grows k times as fast (relative to the path) as the light's own path.
+fn waterInscatter(sigma_t: vec3f, k: f32, path: f32) -> vec3f {
+  let a = sigma_t * (1.0 + k);
+  return (1.0 - exp(-a * path)) / max(a, vec3f(1e-6));
+}
+
+/// Water over the pre-exposed radiance `bottom` leaving the bottom (zero for deep water):
+/// Fresnel-weighted reflection and transmission, Beer-Lambert absorption along the view path
+/// and single scattering (isotropic phase) of the refracted sun (`sun_vis`: shadowed) and
+/// the sky light under the surface, both attenuated with depth.
+fn waterComposite(view: vec3f, w: vec4f, bottom: vec3f, sun_vis: f32) -> vec3f {
+  let n_s = waterSurfaceNormal(w);
+  let f_v = fresnelDielectric(dot(-view, n_s), water.ior);
+  let d = refract(view, n_s, 1.0 / water.ior);
+  let sigma_t = waterExtinction(water);
+  let path = w.y;
+  // Depth gained per metre along the refracted view ray.
+  let mu_v = max(-dot(d, n_s), 0.0);
+  var scatter = vec3f(0.0);
+  let cos_l = dot(sky.light_dir, n_s);
+  if (cos_l > 0.0) {
+    let mu_l = max(dot(waterLightDir(sky.light_dir, n_s, water.ior), n_s), 1e-3);
+    let e_sun = lighting.light_illuminance * (1.0 - fresnelDielectric(cos_l, water.ior)) * sun_vis;
+    scatter += e_sun * waterInscatter(sigma_t, mu_v / mu_l, path);
+  }
+  // Diffuse light: scalar irradiance ≈ planar irradiance × the mean path factor.
+  let e_sky = lighting.sky_irradiance * (1.0 - WATER_SKY_FRESNEL) * WATER_DIFFUSE_PATH;
+  scatter += e_sky * waterInscatter(sigma_t, mu_v * WATER_DIFFUSE_PATH, path);
+  let transmitted = bottom * exp(-sigma_t * path) + water.scattering * water.scatter_albedo / (4.0 * PI) * scatter * preExposure();
+  // Reflection: the sky for now.
+  let reflected = skyRadiance(reflect(view, n_s));
+  return mix(transmitted, reflected, f_v);
+}
+
 fn ggxD(n_h: f32, a2: f32) -> f32 {
   let d = n_h * n_h * (a2 - 1.0) + 1.0;
   return a2 / (PI * d * d);
@@ -216,97 +267,128 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     textureStore(output, px, vec4f(select(vec3f(v), vec3f(0.0), gbIsSky(g.w)), 1.0));
     return;
   }
-  if (gbIsSky(g.w)) {
+  // Seen through water (primary.wgsl only flags it while water is on): the bottom, or
+  // nothing within the trace distance (deep water, flagged as sky).
+  let under = gbThroughWater(g.w);
+  if (gbIsSky(g.w) && !under) {
     textureStore(output, px, vec4f(skyRadiance(view), 1.0));
     return;
   }
-
-  let albedo_ao = unpack4x8unorm(g.x);
-  let surf = unpack4x8unorm(g.z); // roughness, metalness, emission, subsurface
-  let ao = albedo_ao.w;
-  // Worn edges: the hit block and the position inside it from the G-buffer depth (a hair
-  // inside the face, so the cell is the hit block's).
-  var worn: Surface;
-  worn.albedo = albedo_ao.xyz;
-  worn.normal = octDecode(unpack2x16snorm(g.y));
-  worn.roughness = surf.x;
-  let face_id = gbFace(g.w);
-  let depth = textureLoad(gdepth, px, 0).x;
-  let rel = cam.origin_frac + viewRelativePosition(view, cam.forward, depth) - faceNormal(face_id) * 1e-3;
-  let cell_rel = vec3i(floor(rel));
-  let dist = depth / max(dot(view, cam.forward), 1e-4);
-  applyBevel(&worn, materials[gbMaterial(g.w)].flags, cam.origin_cell + cell_rel, face_id, rel - vec3f(cell_rel), dist);
-  let albedo = worn.albedo;
-  let n = worn.normal;
-  let roughness = max(worn.roughness, MIN_ROUGHNESS);
-  let metal = surf.y;
-  let a2 = roughness * roughness * roughness * roughness;
-
-  let v = -view;
-  let l = sky.light_dir;
-  let h = normalize(v + l);
-  let n_v = max(dot(n, v), 1e-4);
-  let n_l_raw = dot(n, l);
-  let n_l = max(n_l_raw, 0.0);
-  let n_h = max(dot(n, h), 0.0);
-  let l_h = max(dot(l, h), 0.0);
-  let f0 = mix(vec3f(F0_DIELECTRIC), albedo, metal);
-  let f = fresnel(f0, max(dot(v, h), 0.0));
-  let diffuse_color = albedo * (1.0 - metal);
-
-  // Dominant light, shadowed by the accumulated sun visibility.
-  let e_light = lighting.light_illuminance * vis.x;
-  let specular = f * ggxD(n_h, a2) * smithV(n_l, n_v, a2);
-  let diffuse = (vec3f(1.0) - f) * diffuse_color / PI * burley(n_l, n_v, l_h, roughness);
-  var color = (diffuse + specular) * e_light * n_l;
-
-  // Leaves: light scattered through from behind (wrapped, tinted by the albedo).
-  let back = max(-n_l_raw, 0.0);
-  color += diffuse_color * surf.w * params.subsurface * back * e_light / PI;
-
-  // World position (flicker field): camera cell + fraction + camera-relative offset.
-  let world = vec3f(cam.origin_cell) + cam.origin_frac + viewRelativePosition(view, cam.forward, textureLoad(gdepth, px, 0).x);
-  let flick = flicker(world, params.time, params.flicker_amount, params.flicker_speed, params.flicker_scale);
-  // Emission: the block's radiance concentrated on its glowing texels (surf.z = their
-  // emission), so a torch flame is much brighter than the face average.
-  let emitter = block_radiance[gbBlockId(g.w)];
-  color += emitter.rgb / max(emitter.a, 1e-3) * surf.z * flick;
-  var result = color * preExposure();
-
-  // Indirect light (pre-exposed).
-  var indirect = vec3f(0.0);
-  if (params.gi_enabled != 0u) {
-    // GI: sky, bounce and emissive light, occluded by real geometry. Replaces the
-    // approximation below entirely (adding both would wash the image out).
-    let gi = giUpsample(px, cam.size, textureLoad(gdepth, px, 0).x, gbFace(g.w));
-    let f_env = envBrdf(f0, roughness, n_v);
-    // Smooth surfaces traced their specular lobe; rough ones take it from the irradiance.
-    let smooth_spec = specularProbability(surf.x, params.gi_spec_threshold) > 0.0;
-    let spec_in = select((gi.diffuse + gi.emissive * flick) / PI, gi.specular, smooth_spec);
-    // Emissive light flickers here (it was accumulated and denoised without flicker).
-    let e_diffuse = gi.diffuse + gi.emissive * flick;
-    indirect = (vec3f(1.0) - f_env) * diffuse_color / PI * e_diffuse * ao + f_env * spec_in;
-  } else {
-    // Approximation without GI: sky light from above, occluded by the traced sky
-    // visibility. The floor and bounce terms are zero unless the non-physical debug-fill
-    // model is selected.
-    let facing = 0.5 + 0.5 * n.y;
-    let sky_vis = max(vis.y, params.ambient_floor);
-    let e_sky = lighting.sky_irradiance;
-    let e_bounce = params.bounce_albedo * (lighting.light_illuminance * max(l.y, 0.0) + e_sky);
-    let bounce_weight = mix(1.0 - facing, 1.0, params.bounce_isotropic);
-    var ambient = diffuse_color / PI * (e_sky * facing * sky_vis + e_bounce * bounce_weight * sky_vis) * ao;
-    // Specular sky reflection (unshadowed beyond sky visibility).
-    let r = reflect(view, n);
-    ambient += f * skyScattering(r) * vis.y * (1.0 - roughness);
-    indirect = ambient * preExposure();
+  var wsample = vec4f(0.0);
+  if (under) {
+    wsample = textureLoad(gwater, px, 0);
   }
-  if (params.mode == 4u) {
-    result = vec3f(0.0);
+  var result = vec3f(0.0);
+  var sun_vis = 1.0;
+  if (!gbIsSky(g.w)) {
+    let albedo_ao = unpack4x8unorm(g.x);
+    let surf = unpack4x8unorm(g.z); // roughness, metalness, emission, subsurface
+    let ao = albedo_ao.w;
+    // Worn edges: the hit block and the position inside it from the G-buffer depth (a hair
+    // inside the face, so the cell is the hit block's).
+    var worn: Surface;
+    worn.albedo = albedo_ao.xyz;
+    worn.normal = octDecode(unpack2x16snorm(g.y));
+    worn.roughness = surf.x;
+    let face_id = gbFace(g.w);
+    let depth = textureLoad(gdepth, px, 0).x;
+    // Seen through water: the true bottom position and the refracted view ray.
+    let pos = select(viewRelativePosition(view, cam.forward, depth), waterBottom(view, wsample, water.ior), under);
+    let rel = cam.origin_frac + pos - faceNormal(face_id) * 1e-3;
+    let cell_rel = vec3i(floor(rel));
+    let dist = select(depth / max(dot(view, cam.forward), 1e-4), wsample.x + wsample.y, under);
+    applyBevel(&worn, materials[gbMaterial(g.w)].flags, cam.origin_cell + cell_rel, face_id, rel - vec3f(cell_rel), dist);
+    let albedo = worn.albedo;
+    let n = worn.normal;
+    let roughness = max(worn.roughness, MIN_ROUGHNESS);
+    let metal = surf.y;
+    let a2 = roughness * roughness * roughness * roughness;
+
+    var v = -view;
+    var l = sky.light_dir;
+    // Light reaching a bottom under water (1 elsewhere): direct and indirect.
+    var att_direct = vec3f(1.0);
+    var att_indirect = vec3f(1.0);
+    if (under) {
+      let n_s = waterSurfaceNormal(wsample);
+      v = -refract(view, n_s, 1.0 / water.ior);
+      let sigma_t = waterExtinction(water);
+      let depth_below = max(view.y * wsample.x - pos.y, 0.0);
+      let cos_l = dot(sky.light_dir, n_s);
+      l = waterLightDir(sky.light_dir, n_s, water.ior);
+      att_direct = (1.0 - fresnelDielectric(cos_l, water.ior)) * exp(-sigma_t * depth_below / max(dot(l, n_s), 1e-3));
+      att_indirect = (1.0 - WATER_SKY_FRESNEL) * exp(-sigma_t * depth_below * WATER_DIFFUSE_PATH);
+    }
+    let h = normalize(v + l);
+    let n_v = max(dot(n, v), 1e-4);
+    let n_l_raw = dot(n, l);
+    let n_l = max(n_l_raw, 0.0);
+    let n_h = max(dot(n, h), 0.0);
+    let l_h = max(dot(l, h), 0.0);
+    let f0 = mix(vec3f(F0_DIELECTRIC), albedo, metal);
+    let f = fresnel(f0, max(dot(v, h), 0.0));
+    let diffuse_color = albedo * (1.0 - metal);
+
+    // Dominant light, shadowed by the accumulated sun visibility.
+    let e_light = lighting.light_illuminance * vis.x * att_direct;
+    let specular = f * ggxD(n_h, a2) * smithV(n_l, n_v, a2);
+    let diffuse = (vec3f(1.0) - f) * diffuse_color / PI * burley(n_l, n_v, l_h, roughness);
+    var color = (diffuse + specular) * e_light * n_l;
+
+    // Leaves: light scattered through from behind (wrapped, tinted by the albedo).
+    let back = max(-n_l_raw, 0.0);
+    color += diffuse_color * surf.w * params.subsurface * back * e_light / PI;
+
+    // World position (flicker field): camera cell + fraction + camera-relative offset.
+    let world = vec3f(cam.origin_cell) + cam.origin_frac + pos;
+    let flick = flicker(world, params.time, params.flicker_amount, params.flicker_speed, params.flicker_scale);
+    // Emission: the block's radiance concentrated on its glowing texels (surf.z = their
+    // emission), so a torch flame is much brighter than the face average.
+    let emitter = block_radiance[gbBlockId(g.w)];
+    color += emitter.rgb / max(emitter.a, 1e-3) * surf.z * flick;
+    result = color * preExposure();
+
+    // Indirect light (pre-exposed).
+    var indirect = vec3f(0.0);
+    if (params.gi_enabled != 0u) {
+      // GI: sky, bounce and emissive light, occluded by real geometry. Replaces the
+      // approximation below entirely (adding both would wash the image out).
+      let gi = giUpsample(px, cam.size, textureLoad(gdepth, px, 0).x, gbFace(g.w));
+      let f_env = envBrdf(f0, roughness, n_v);
+      // Smooth surfaces traced their specular lobe; rough ones take it from the irradiance.
+      let smooth_spec = specularProbability(surf.x, params.gi_spec_threshold) > 0.0;
+      let spec_in = select((gi.diffuse + gi.emissive * flick) / PI, gi.specular, smooth_spec);
+      // Emissive light flickers here (it was accumulated and denoised without flicker).
+      let e_diffuse = gi.diffuse + gi.emissive * flick;
+      indirect = (vec3f(1.0) - f_env) * diffuse_color / PI * e_diffuse * ao + f_env * spec_in;
+    } else {
+      // Approximation without GI: sky light from above, occluded by the traced sky
+      // visibility. The floor and bounce terms are zero unless the non-physical debug-fill
+      // model is selected.
+      let facing = 0.5 + 0.5 * n.y;
+      let sky_vis = max(vis.y, params.ambient_floor);
+      let e_sky = lighting.sky_irradiance;
+      let e_bounce = params.bounce_albedo * (lighting.light_illuminance * max(l.y, 0.0) + e_sky);
+      let bounce_weight = mix(1.0 - facing, 1.0, params.bounce_isotropic);
+      var ambient = diffuse_color / PI * (e_sky * facing * sky_vis + e_bounce * bounce_weight * sky_vis) * ao;
+      // Specular sky reflection (unshadowed beyond sky visibility).
+      let r = reflect(-v, n);
+      ambient += f * skyScattering(r) * vis.y * (1.0 - roughness);
+      indirect = ambient * preExposure();
+    }
+    indirect *= att_indirect;
+    if (params.mode == 4u) {
+      result = vec3f(0.0);
+    }
+    result += indirect;
+    sun_vis = vis.x;
   }
-  result += indirect;
+  if (under && params.mode == 0u) {
+    result = waterComposite(view, wsample, result, sun_vis);
+  }
   if (params.aerial_enabled != 0u) {
-    let air = aerialPerspective(uv, textureLoad(gdepth, px, 0).x);
+    let air_depth = select(textureLoad(gdepth, px, 0).x, wsample.x * dot(view, cam.forward), under);
+    let air = aerialPerspective(uv, air_depth);
     result = result * air.a + air.rgb;
   }
   textureStore(output, px, vec4f(result, 1.0));

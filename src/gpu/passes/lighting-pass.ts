@@ -3,6 +3,7 @@ import type { GpuBrickmap } from '../brickmap';
 import type { GBuffer } from '../gbuffer';
 import type { MaterialSystem } from '../materials';
 import { traceConstants } from '../trace-constants';
+import type { WaterSystem } from '../water';
 import { createShaderModule } from '../shader';
 import type { SkySystem } from '../sky';
 import { SCENE_FORMAT } from './gradient-pass';
@@ -44,6 +45,7 @@ export class LightingPass implements RenderPass {
     /** Worn edges look up neighbouring blocks and material flags. */
     private readonly brickmap: GpuBrickmap,
     private readonly materials: MaterialSystem,
+    private readonly water: WaterSystem,
   ) {
     aerial.onVolumeChange = () => {
       this.groups.clear();
@@ -90,7 +92,7 @@ export class LightingPass implements RenderPass {
 
   execute(ctx: FrameContext): void {
     const g = this.gbuffer;
-    if (!this.output || !g.gbuffer0 || !g.depth) return;
+    if (!this.output || !g.gbuffer0 || !g.depth || !g.water) return;
     const vis = this.visibility.output;
     if (!vis) return;
     const giOn = config.gi.enabled;
@@ -114,6 +116,8 @@ export class LightingPass implements RenderPass {
           { binding: 9, resource: gi.guide.createView() },
           { binding: 10, resource: gi.emissive.createView() },
           { binding: 11, resource: { buffer: this.gi.emitterRadiance } },
+          { binding: 12, resource: g.water!.createView() },
+          { binding: 13, resource: { buffer: this.water.params } },
         ],
       });
       this.groups.set(key, group);

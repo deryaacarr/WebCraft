@@ -198,6 +198,7 @@ export class DebugOverlay {
     this.buildCameraControls(hooks);
     this.buildMaterialControls(hooks);
     this.buildDetailControls();
+    this.buildWaterControls();
     this.buildSkyControls(hooks);
     this.buildGiControls(hooks);
     this.buildExposureControls();
@@ -450,6 +451,21 @@ export class DebugOverlay {
     f.add(d, 'mossMaxDistance', 0, 256, 1).name('moss LOD distance');
     f.add(d, 'foliageStrength', 0, 1, 0.05).name('grass & leaf tint');
     f.add(d, 'foliageScale', 5, 150, 1).name('grass & leaf tint scale (m)');
+    f.close();
+  }
+
+  private buildWaterControls(): void {
+    const w = config.water;
+    const f = this.gui.addFolder('Water');
+    f.add(w, 'enabled').name('transparent water (off = opaque block)');
+    f.add(w, 'clarity', 0, 1, 0.01).name('clarity');
+    f.addColor(w, 'absorptionColor').name('absorption colour');
+    f.add(w, 'absorptionDistance', 0.5, 20, 0.5).name('absorption colour at (m)');
+    f.addColor(w, 'scatterColor').name('water colour (scattering)');
+    f.add(w, 'shadowBlur', 0, 3, 0.05).name('shadow softening (turbid)');
+    f.add(w, 'detailBlur', 0, 0.5, 0.01).name('bottom detail blur');
+    f.add(w, 'ior', 1, 1.5, 0.001).name('index of refraction');
+    f.add(w, 'maxDistance', 4, 128, 1).name('max path in water (m)');
     f.close();
   }
 

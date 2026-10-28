@@ -20,11 +20,13 @@ export function microFixupEnabled(): boolean {
   return config.detail.microVoxels && shapedIdMask() !== 0;
 }
 
+/** `always`: build the fix-up even without shaped blocks (the primary pass also fixes up water). */
 export async function createMicroPipelines(
   device: GPUDevice,
   label: string,
   module: GPUShaderModule,
   constants: Record<string, number>,
+  always = false,
 ): Promise<MicroPipelines> {
   const make = (micro: boolean) =>
     device.createComputePipelineAsync({
@@ -32,7 +34,7 @@ export async function createMicroPipelines(
       layout: 'auto',
       compute: { module, entryPoint: 'main', constants: { ...constants, MICRO_WALK: micro ? 1 : 0 } },
     });
-  const [main, fixup] = await Promise.all([make(false), microFixupEnabled() ? make(true) : null]);
+  const [main, fixup] = await Promise.all([make(false), always || microFixupEnabled() ? make(true) : null]);
   return { main, fixup };
 }
 
@@ -47,7 +49,7 @@ export function createMicroFlags(device: GPUDevice, label: string, width: number
   });
 }
 
-/** Zeroes a flag texture (a render pass clear: cheap, no shader). */
+/** Zeroes a flag (or other renderable) texture (a render pass clear: cheap, no shader). */
 export function clearMicroFlags(encoder: GPUCommandEncoder, flags: GPUTexture): void {
   encoder
     .beginRenderPass({ label: `${flags.label}-clear`, colorAttachments: [{ view: flags.createView(), loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 0] }] })

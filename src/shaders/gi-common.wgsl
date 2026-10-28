@@ -7,8 +7,8 @@
 // (rgba32uint) caches what the half-res passes need from the G-buffer:
 //   x  linear view depth (f32 bits)
 //   y  shading normal, octahedral pack2x16snorm
-//   z  gbuffer0.w (block, material, geometric face, sky flag) with the DDA step bits
-//      replaced by the roughness (12 bits)
+//   z  gbuffer0.w (block, material, geometric face, sky flag) with the DDA step bits and
+//      the water flag replaced by the roughness (12 bits)
 //   w  plane coordinate: dot(face normal, camera-relative position) (f32 bits); two
 //      pixels on the same face plane have equal values (cheap edge-stopping)
 #include "gbuffer.wgsl"

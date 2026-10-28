@@ -17,10 +17,15 @@
 // Outputs are pre-exposed: raw_diffuse = irradiance, raw_specular = radiance. Only the
 // pixels traced this frame are written (the dispatch covers just those, see tracedPixel);
 // the others keep older samples, which the temporal pass ignores (isTraced).
+//
+// Pixels seen through water (water.wgsl) start at the true bottom position and their rays
+// pass through water (no refraction; the lighting pass applies the absorption). Rays from
+// above the water still stop at its surface (as before).
 #include "trace.wgsl"
 #include "gi-common.wgsl"
 #include "material.wgsl"
 #include "sky.wgsl"
+#include "water.wgsl"
 
 @group(0) @binding(0) var<uniform> cam: Camera;
 @group(0) @binding(1) var<uniform> params: GiParams;
@@ -41,8 +46,12 @@
 /// writes, fix-up reads and redoes the flagged pixels with the same random numbers.
 @group(0) @binding(13) var micro_flag_out: texture_storage_2d<r32uint, write>;
 @group(0) @binding(14) var micro_flag_in: texture_2d<u32>;
+@group(0) @binding(15) var gwater: texture_2d<f32>;
+@group(0) @binding(16) var<uniform> water: WaterParams;
 /// Set when any ray of the pixel stopped at a shaped block.
 var<private> hit_shaped: bool;
+/// The pixel is seen through water: its rays pass through water.
+var<private> under_water: bool;
 
 override WORKGROUP_X: u32 = 8u;
 override WORKGROUP_Y: u32 = 8u;
@@ -55,6 +64,9 @@ const SCREEN_DEPTH_TOLERANCE: f32 = 0.02;
 /// the texture's mean opacity, see MaterialInfo). Same expected light as the alpha-tested
 /// shadow rays, without texture lookups per voxel or loops over leaf crossings.
 fn traceOpaque(id: u32, cell: vec3i, normal: vec3i, local: vec3f, t: f32, dir: vec3f) -> bool {
+  if (under_water && id == WATER_ID) {
+    return false;
+  }
   let face = faceIndex(select(normal, vec3i(0, 1, 0), all(normal == vec3i(0))));
   let info = materials[faceMaterial(id, face)];
   if ((info.flags & MATERIAL_ALPHA_TEST) == 0u) {
@@ -212,7 +224,10 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let view = rayDir(cam.inv_view_proj, uv);
   let n_geo = faceNormal(gbFace(g.z));
   let n = guideNormal(g);
-  let start = cam.origin_frac + viewRelativePosition(view, cam.forward, guideDepth(g)) + n_geo * SURFACE_OFFSET;
+  let w = textureLoad(gwater, vec2i(q), 0);
+  under_water = throughWater(w);
+  let pos = select(viewRelativePosition(view, cam.forward, guideDepth(g)), waterBottom(view, w, water.ior), under_water);
+  let start = cam.origin_frac + pos + n_geo * SURFACE_OFFSET;
 
   let noise0 = blueNoise(blue_noise, p, cam.frame_index, 0u);
   let noise1 = blueNoise(blue_noise, p, cam.frame_index, 1u);

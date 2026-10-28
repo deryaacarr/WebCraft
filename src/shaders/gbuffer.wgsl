@@ -5,7 +5,8 @@
 //   y  shading normal (normal-mapped), octahedral pack2x16snorm
 //   z  pack4x8unorm(roughness, metalness, emission, subsurface)
 //   w  bits 0-7 block id · 8-15 material index · 16-18 geometric face
-//      (0..5 = +X −X +Y −Y +Z −Z) · 19-30 DDA steps (clamped) · 31 sky flag
+//      (0..5 = +X −X +Y −Y +Z −Z) · 19-29 DDA steps (clamped) · 30 seen through water
+//      (water.wgsl: read gwater) · 31 sky flag
 // depth  (r32float):  linear view depth (distance along the camera forward axis)
 // motion (rg32float): screen UV delta, current − previous
 // Bit positions are mirrored in src/gpu/gbuffer.ts.
@@ -13,7 +14,8 @@
 const GB_SKY_FLAG: u32 = 0x80000000u;
 const GB_FACE_SHIFT: u32 = 16u;
 const GB_STEPS_SHIFT: u32 = 19u;
-const GB_STEPS_MAX: u32 = 0xfffu;
+const GB_STEPS_MAX: u32 = 0x7ffu;
+const GB_WATER_FLAG: u32 = 0x40000000u;
 
 fn octEncode(n: vec3f) -> vec2f {
   var p = n.xy / (abs(n.x) + abs(n.y) + abs(n.z));
@@ -51,6 +53,10 @@ fn faceNormal(face: u32) -> vec3f {
 fn packMaterialWord(block_id: u32, material: u32, face: u32, steps: u32, sky: bool) -> u32 {
   return (block_id & 0xffu) | ((material & 0xffu) << 8u) | ((face & 7u) << GB_FACE_SHIFT) |
     (min(steps, GB_STEPS_MAX) << GB_STEPS_SHIFT) | select(0u, GB_SKY_FLAG, sky);
+}
+
+fn gbThroughWater(word: u32) -> bool {
+  return (word & GB_WATER_FLAG) != 0u;
 }
 
 fn gbIsSky(word: u32) -> bool {

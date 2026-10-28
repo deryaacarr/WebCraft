@@ -6,6 +6,7 @@ import { createMicroFlags, createMicroPipelines, microFlagDummy } from '../micro
 import { createShaderModule } from '../shader';
 import type { SkySystem } from '../sky';
 import { traceConstants } from '../trace-constants';
+import type { WaterSystem } from '../water';
 import type { FrameContext, RenderPass } from './pass';
 
 /**
@@ -48,6 +49,7 @@ export class VisibilityPass implements RenderPass {
     private readonly brickmap: GpuBrickmap,
     private readonly materials: MaterialSystem,
     private readonly sky: SkySystem,
+    private readonly water: WaterSystem,
   ) {
     const uniform = (label: string, size = 16) => device.createBuffer({ label, size, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.params = uniform('visibility-params', 32);
@@ -88,7 +90,7 @@ export class VisibilityPass implements RenderPass {
 
   resize(width: number, height: number): void {
     const g = this.gbuffer;
-    if (!g.gbuffer0 || !g.depth || !g.motion) return;
+    if (!g.gbuffer0 || !g.depth || !g.motion || !g.water) return;
     for (const t of [this.raw, this.prevGbuffer, this.prevDepth, this.filtered, this.flags, ...(this.history ?? [])]) t?.destroy();
     this.flags = createMicroFlags(this.device, 'visibility', width, height);
     const dummy = microFlagDummy(this.device).createView();
@@ -118,6 +120,8 @@ export class VisibilityPass implements RenderPass {
           { binding: 4, resource: { buffer: this.params } },
           { binding: 5, resource: flagOut },
           { binding: 6, resource: flagIn },
+          { binding: 7, resource: g.water!.createView() },
+          { binding: 8, resource: { buffer: this.water.params } },
         ],
       });
     this.traceGroup = traceGroup(this.tracePipeline, this.flags.createView(), dummy);
