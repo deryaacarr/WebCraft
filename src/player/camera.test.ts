@@ -53,9 +53,12 @@ describe('FlyCamera', () => {
     expect(cam.frame(0.5, 16, 16).position[2]).toBeCloseTo(-config.camera.speed / 2);
   });
 
-  it('jitters with Halton(2,3) only when enabled', () => {
+  it('jitters with Halton(2,3) only when enabled (directly or by TAAU)', () => {
     const cam = new FlyCamera([0, 0, 0], 0);
+    const taau = config.taau.enabled;
+    config.taau.enabled = false;
     expect(cam.frame(1, 8, 8).jitter).toEqual([0, 0]);
+    config.taau.enabled = taau;
     config.camera.jitter = true;
     expect(cam.frame(1, 8, 8).jitter).toEqual([0, 1 / 3 - 0.5]);
     const j2 = cam.frame(1, 8, 8).jitter;

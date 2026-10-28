@@ -22,7 +22,8 @@ struct BlitParams {
   /// AgX punchy look: contrast power and saturation in AgX log space.
   punchy_contrast: f32,
   punchy_saturation: f32,
-  _pad: f32,
+  /// CAS-like sharpening after tone mapping (0 = off; the TAAU output).
+  sharpness: f32,
 };
 
 /// Exposure pass state (exposure.wgsl): only the white-balance matrix is used here.
@@ -99,17 +100,35 @@ fn agx(color: vec3f, punchy: bool) -> vec3f {
   return pow(clamp(v, vec3f(0.0), vec3f(1.0)), vec3f(2.2));
 }
 
+/// White balance + tone mapping of a pre-exposed HDR colour (as is for debug views).
+fn display(color: vec3f) -> vec3f {
+  if (params.tonemap == 0u) {
+    return color;
+  }
+  let wb = mat3x3f(exposure_state.wb0.xyz, exposure_state.wb1.xyz, exposure_state.wb2.xyz);
+  let c = max(wb * color, vec3f(0.0));
+  if (params.tonemap == 2u) {
+    return aces(c);
+  }
+  return agx(c, params.tonemap == 3u);
+}
+
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4f {
-  var c = textureSample(source, source_sampler, in.uv).rgb;
-  if (params.tonemap != 0u) {
-    let wb = mat3x3f(exposure_state.wb0.xyz, exposure_state.wb1.xyz, exposure_state.wb2.xyz);
-    c = max(wb * c, vec3f(0.0));
-    if (params.tonemap == 2u) {
-      c = aces(c);
-    } else {
-      c = agx(c, params.tonemap == 3u);
-    }
+  var c = display(textureSample(source, source_sampler, in.uv).rgb);
+  if (params.sharpness > 0.0) {
+    // Contrast-adaptive sharpening (after AMD CAS): a negative-lobe cross filter whose
+    // strength drops where the neighbourhood is already contrasty (no ringing, no halos).
+    let texel = 1.0 / vec2f(textureDimensions(source));
+    let n = display(textureSampleLevel(source, source_sampler, in.uv + vec2f(0.0, -texel.y), 0.0).rgb);
+    let s = display(textureSampleLevel(source, source_sampler, in.uv + vec2f(0.0, texel.y), 0.0).rgb);
+    let w = display(textureSampleLevel(source, source_sampler, in.uv + vec2f(-texel.x, 0.0), 0.0).rgb);
+    let e = display(textureSampleLevel(source, source_sampler, in.uv + vec2f(texel.x, 0.0), 0.0).rgb);
+    let lo = min(c, min(min(n, s), min(w, e)));
+    let hi = max(c, max(max(n, s), max(w, e)));
+    let amp = sqrt(clamp(min(lo, 1.0 - hi) / max(hi, vec3f(1e-4)), vec3f(0.0), vec3f(1.0)));
+    let k = amp * mix(-1.0 / 8.0, -1.0 / 5.0, params.sharpness);
+    c = clamp((c + k * (n + s + w + e)) / (1.0 + 4.0 * k), vec3f(0.0), vec3f(1.0));
   }
   // Scene textures are linear; the swap chain is a plain (non-sRGB) format.
   return vec4f(linearToSrgb(c), 1.0);

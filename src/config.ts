@@ -54,10 +54,27 @@ export const config = {
     pauseHidden: true,
     pauseUnfocused: true,
   },
+  /** Temporal upsampling (taau.wgsl): jittered internal frames accumulated at the output
+   *  resolution (`outputScale` × canvas: 1, 0.75 or 0.5 — the blit upscales the rest of
+   *  the way; full resolution cost ~2.75 ms at 2880×1600). History caps in frames (still / camera moving /
+   *  on water — waves, reflections and foam move on their own), clip box in standard
+   *  deviations (YCoCg), disocclusion depth tolerance, CAS-like sharpening in the blit. */
+  taau: {
+    enabled: true,
+    outputScale: 0.75 as 1 | 0.75 | 0.5,
+    framesStill: 12,
+    framesMoving: 5,
+    framesWater: 4,
+    gamma: 1.25,
+    gammaWater: 0.8,
+    depthTolerance: 0.05,
+    sharpness: 0.35,
+  },
   render: {
-    /** Internal (traced) resolution relative to the canvas backing size, upscaled in the
-     *  blit pass. 0.5 on a Retina canvas ≈ 1440×800 primary rays. */
-    renderScale: 0.5,
+    /** Internal (traced) resolution relative to the canvas backing size, upscaled by the
+     *  TAAU pass (or the blit with TAAU off). 0.4 on a Retina canvas ≈ 1152×640 primary
+     *  rays (0.5 = 1440×800 was the setting before TAAU). */
+    renderScale: 0.4,
     /** Tone mapper for the lit view (ACES fit = the stage 7 reference look; AgX options). */
     tonemapper: 'aces' as 'agx' | 'agx-punchy' | 'aces',
     /** AgX punchy look, applied in AgX log space: contrast power and saturation. */
@@ -210,7 +227,7 @@ export const config = {
     boostMultiplier: 5,
     /** Pitch limit in degrees (avoids flipping over the poles). */
     maxPitch: 89,
-    /** Sub-pixel Halton(2,3) jitter for TAA. Off until TAA exists (it shimmers without it). */
+    /** Sub-pixel Halton(2,3) jitter without TAAU (TAAU turns it on itself). */
     jitter: false,
     /** Jitter sequence length before it repeats. */
     jitterSequenceLength: 8,

@@ -9,6 +9,8 @@ export class BlitPass implements RenderPass {
   private pipeline!: GPURenderPipeline;
   private sampler!: GPUSampler;
   private bindGroup: GPUBindGroup | null = null;
+  /** Bind groups per source texture (the TAAU output alternates between two). */
+  private readonly groups = new Map<GPUTexture, GPUBindGroup>();
   private params!: GPUBuffer;
   private tonemapKey = '';
 
@@ -20,16 +22,17 @@ export class BlitPass implements RenderPass {
     private readonly exposureState: GPUBuffer,
   ) {}
 
-  /** 'none' for debug views; AgX / ACES (with white balance) for pre-exposed HDR. */
-  setTonemap(mode: 'none' | 'agx' | 'agx-punchy' | 'aces'): void {
+  /** 'none' for debug views; AgX / ACES (with white balance) for pre-exposed HDR.
+   *  `sharpness` 0..1: CAS-like sharpening after tone mapping (TAAU output). */
+  setTonemap(mode: 'none' | 'agx' | 'agx-punchy' | 'aces', sharpness = 0): void {
     const value = { none: 0, agx: 1, aces: 2, 'agx-punchy': 3 }[mode];
     const r = config.render;
-    const key = `${value},${r.agxPunchyContrast},${r.agxPunchySaturation}`;
+    const key = `${value},${r.agxPunchyContrast},${r.agxPunchySaturation},${sharpness}`;
     if (key === this.tonemapKey) return;
     this.tonemapKey = key;
     const data = new ArrayBuffer(16);
     new Uint32Array(data)[0] = value;
-    new Float32Array(data).set([r.agxPunchyContrast, r.agxPunchySaturation], 1);
+    new Float32Array(data).set([r.agxPunchyContrast, r.agxPunchySaturation, sharpness], 1);
     this.device.queue.writeBuffer(this.params, 0, data);
   }
 
@@ -55,6 +58,12 @@ export class BlitPass implements RenderPass {
 
   /** Rebinds the texture to upscale; call whenever the source is recreated. */
   setSource(source: GPUTexture): void {
+    const cached = this.groups.get(source);
+    if (cached) {
+      this.bindGroup = cached;
+      return;
+    }
+    if (this.groups.size > 8) this.groups.clear(); // resized textures
     this.bindGroup = this.device.createBindGroup({
       label: this.name,
       layout: this.pipeline.getBindGroupLayout(0),
@@ -65,6 +74,7 @@ export class BlitPass implements RenderPass {
         { binding: 3, resource: { buffer: this.exposureState } },
       ],
     });
+    this.groups.set(source, this.bindGroup);
   }
 
   execute(ctx: FrameContext): void {

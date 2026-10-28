@@ -148,7 +148,7 @@ export class FlyCamera {
   }
 
   private nextJitter(): [number, number] {
-    if (!config.camera.jitter) return [0, 0];
+    if (!config.camera.jitter && !config.taau.enabled) return [0, 0];
     // Index from 1: halton(0) = 0 for every base.
     const i = (this.frameIndex++ % config.camera.jitterSequenceLength) + 1;
     return [halton(i, 2) - 0.5, halton(i, 3) - 0.5];

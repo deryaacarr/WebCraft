@@ -61,7 +61,7 @@ export interface DebugOverlayHooks {
   /** Compares the G-buffer rendered with and without the depth prepass. */
   onVerifyPrepass(): Promise<{ pixels: number; mismatches: number; first?: string }>;
   /** Frame cost by stage (ms): primary, visibility, GI trace, GI denoise, other. */
-  onBenchmarkFrame(): Promise<Record<'primary' | 'visibility' | 'giTrace' | 'giDenoise' | 'water' | 'other', number | null>>;
+  onBenchmarkFrame(): Promise<Record<'primary' | 'visibility' | 'giTrace' | 'giDenoise' | 'water' | 'taau' | 'other', number | null>>;
   /** Places test torches around the camera; returns how many. */
   onPlaceTorches(): number;
   onPlaceRocks(): number;
@@ -175,6 +175,15 @@ export class DebugOverlay {
       .add(config.render, 'maxPixelRatio', 0.5, 4, 0.25)
       .name('max pixel ratio')
       .onFinishChange(() => hooks.onResolutionChange());
+    const t = config.taau;
+    render.add(t, 'enabled').name('TAAU (temporal upsampling)');
+    render.add(t, 'outputScale', { '1.0 (canvas)': 1, '0.75': 0.75, '0.5': 0.5 }).name('TAAU output scale').onChange(() => hooks.onResolutionChange());
+    render.add(t, 'sharpness', 0, 1, 0.05).name('TAAU sharpening');
+    render.add(t, 'framesStill', 2, 32, 1).name('TAAU history (still)');
+    render.add(t, 'framesMoving', 1, 16, 1).name('TAAU history (moving)');
+    render.add(t, 'framesWater', 1, 16, 1).name('TAAU history (water)');
+    render.add(t, 'gamma', 0.5, 3, 0.05).name('TAAU clip box (σ)');
+    render.add(t, 'gammaWater', 0.25, 3, 0.05).name('TAAU clip box on water (σ)');
 
     const gradient = this.gui.addFolder('Test gradient');
     gradient.add(config.gradient, 'speed', 0, 2, 0.01);
@@ -412,7 +421,7 @@ export class DebugOverlay {
           (t) => {
             const ms = (x: number | null) => (x === null ? 'n/a' : x.toFixed(2));
             const total = Object.values(t).reduce<number>((a, b) => a + (b ?? 0), 0);
-            v.frame = `primary ${ms(t.primary)} | vis ${ms(t.visibility)} | GI ${ms(t.giTrace)} | denoise ${ms(t.giDenoise)} | water ${ms(t.water)} | other ${ms(t.other)} | total ${total.toFixed(2)}`;
+            v.frame = `primary ${ms(t.primary)} | vis ${ms(t.visibility)} | GI ${ms(t.giTrace)} | denoise ${ms(t.giDenoise)} | water ${ms(t.water)} | taau ${ms(t.taau)} | other ${ms(t.other)} | total ${total.toFixed(2)}`;
           },
           (err: unknown) => {
             v.frame = `error: ${err instanceof Error ? err.message : String(err)}`;

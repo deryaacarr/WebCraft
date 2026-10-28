@@ -11,6 +11,7 @@ import { GiPass } from './passes/gi-pass';
 import { LightingPass } from './passes/lighting-pass';
 import { VisibilityPass } from './passes/visibility-pass';
 import { WaterReflectionPass } from './passes/water-reflection-pass';
+import { TaauPass } from './passes/taau-pass';
 import type { SkySystem } from './sky';
 import { CanvasSize } from './canvas-size';
 import type { GpuContext } from './device';
@@ -47,6 +48,8 @@ export class Renderer {
   private readonly gi: GiPass;
   private readonly aerial: AerialPerspectivePass;
   private readonly reflection: WaterReflectionPass;
+  private readonly taau: TaauPass;
+  private taauWasOn = config.taau.enabled;
   private readonly exposure: ExposurePass;
   private lastTime: number | null = null;
   private readonly allPasses: RenderPass[];
@@ -89,20 +92,28 @@ export class Renderer {
     this.gi = gi;
     this.aerial = aerial;
     const exposure = new ExposurePass(device, () => lighting.output, this.gbuffer, sky);
+    const taau = new TaauPass(device, this.gbuffer, camera, () => lighting.output, sky.exposure, () => ({ width: this.size.width, height: this.size.height }));
+    this.taau = taau;
     this.exposure = exposure;
     const view = new GBufferViewPass(device, this.gbuffer);
     const topdown = new TopdownPass(device, brickmap);
     const gradient = new GradientPass(device);
     const out = (p: { output: GPUTexture | null }) => () => p.output;
     this.chains = {
-      lit: { passes: [primary, visibility, gi, reflection, aerial, lighting, exposure], output: out(lighting), tonemap: true, sky: true },
+      // TAAU before the exposure pass: the lit image carries this frame's pre-exposure.
+      lit: {
+        passes: [primary, visibility, gi, reflection, aerial, lighting, taau, exposure],
+        output: () => (config.taau.enabled ? taau.output : lighting.output),
+        tonemap: true,
+        sky: true,
+      },
       visibility: { passes: [primary, visibility, gi, reflection, aerial, lighting], output: out(lighting), tonemap: false, sky: true },
       gbuffer: { passes: [primary, view], output: out(view), tonemap: false, sky: false },
       topdown: { passes: [topdown], output: out(topdown), tonemap: false, sky: false },
       gradient: { passes: [gradient], output: out(gradient), tonemap: false, sky: false },
     };
     // Resize order matters: the G-buffer consumers after the passes they read from.
-    this.allPasses = [primary, visibility, gi, reflection, aerial, lighting, exposure, view, topdown, gradient];
+    this.allPasses = [primary, visibility, gi, reflection, aerial, lighting, taau, exposure, view, topdown, gradient];
     this.blit = new BlitPass(device, gpu.context, gpu.format, sky.exposure);
   }
 
@@ -126,7 +137,7 @@ export class Renderer {
     const view = config.debug.view;
     const chain = this.chainFor(view);
     this.lighting.mode = view === 'shadow' || view === 'skyvis' || view === 'history' || view === 'gi' ? view : 'lit';
-    this.blit.setTonemap(chain.tonemap ? config.render.tonemapper : 'none');
+    this.blit.setTonemap(chain.tonemap ? config.render.tonemapper : 'none', chain === this.chains.lit && config.taau.enabled ? config.taau.sharpness : 0);
     const output = chain.output();
     if (output !== this.boundOutput && output) {
       this.blit.setSource(output);
@@ -144,7 +155,12 @@ export class Renderer {
 
     this.profiler.beginFrame();
     if (chain.sky) this.sky.encode(encoder);
-    for (const pass of chain.passes) pass.execute(ctx);
+    if (config.taau.enabled && !this.taauWasOn) this.taau.invalidate();
+    this.taauWasOn = config.taau.enabled;
+    for (const pass of chain.passes) {
+      if (pass === this.taau && !config.taau.enabled) continue;
+      pass.execute(ctx);
+    }
     this.blit.execute(ctx);
     this.profiler.resolve(encoder);
 
@@ -202,7 +218,7 @@ export class Renderer {
    * frame): primary, visibility, GI tracing (ReSTIR + paths), GI denoising, water
    * reflections and the rest (aerial perspective, shading, exposure). Sky LUTs and the blit are not included.
    */
-  async benchmarkFrame(iterations: number): Promise<Record<'primary' | 'visibility' | 'giTrace' | 'giDenoise' | 'water' | 'other', number | null>> {
+  async benchmarkFrame(iterations: number): Promise<Record<'primary' | 'visibility' | 'giTrace' | 'giDenoise' | 'water' | 'taau' | 'other', number | null>> {
     // Energy saving off while measuring (core/power.ts).
     return withoutPowerSaving(async () => {
       const time = async (passes: RenderPass[]) => (await this.benchmarkPasses(passes, iterations)).gpuMs;
@@ -221,9 +237,10 @@ export class Renderer {
         }
       }
       const water = await time([this.reflection]);
+      const taau = config.taau.enabled ? await time([this.taau]) : null;
       // Only passes that record work (the timestamps pair the first and last pass).
       const other = await time([...(config.sky.aerialPerspective.enabled ? [this.aerial] : []), this.lighting, this.exposure]);
-      return { primary, visibility, giTrace, giDenoise, water, other };
+      return { primary, visibility, giTrace, giDenoise, water, taau, other };
     });
   }
 
