@@ -1,7 +1,7 @@
 import { config } from '../config';
 
-/** WaterParams in water.wgsl: six 16-byte rows. */
-const PARAMS_SIZE = 96;
+/** WaterParams in water.wgsl: nine 16-byte rows. */
+const PARAMS_SIZE = 144;
 
 type Rgb = [number, number, number];
 
@@ -48,6 +48,7 @@ export class WaterSystem {
     // Wind waves grow with the square of the wind speed (calm lake ≈ 2 m/s).
     const amplitude = w.waveStrength * w.waveHeight * (wind.speed / 2) ** 2;
     f32.set([Math.sin(a), -Math.cos(a), amplitude, time % 3600, w.wavelength, w.ripples * Math.min(wind.speed / 2, 2), w.level], 16);
+    f32.set([w.turbidity, w.turbidityDepth, w.foam, w.foamWidth, ...w.sedimentColor, w.caustics, w.wetShore, w.wetMaxDistance], 24);
     this.device.queue.writeBuffer(this.params, 0, this.data);
   }
 }

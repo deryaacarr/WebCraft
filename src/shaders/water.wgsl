@@ -50,6 +50,20 @@ struct WaterParams {
   ripple: f32,
   level: f32,
   _pad2: f32,
+  /// Shore (water-shore.wgsl): sediment scattering per metre at zero depth, falling off
+  /// over turbidity_depth metres; foam strength and strip width (metres).
+  turbidity: f32,
+  turbidity_depth: f32,
+  foam: f32,
+  foam_width: f32,
+  /// Sediment's scattering colour (linear albedo); caustics strength.
+  sediment: vec3f,
+  caustics: f32,
+  /// Wet ground beside the water: strength, distance limit (blocks).
+  wet: f32,
+  wet_max_distance: f32,
+  _pad3: f32,
+  _pad4: f32,
 };
 
 fn waterMeanScattering(w: WaterParams) -> f32 {

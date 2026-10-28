@@ -41,6 +41,8 @@ const SALT_TREE_ACCEPT = 103;
 const SALT_TRUNK = 104;
 const SALT_LEAF = 105;
 const SALT_DIRT = 106;
+/** Frequency multiplier of the detail noise for lake-bed material borders (~8 m features). */
+const BED_NOISE_SCALE = 3;
 // Per-field seed offsets so the noise fields are uncorrelated.
 const enum Field {
   Continentalness = 1,
@@ -145,11 +147,16 @@ export class TerrainGenerator {
     const e = this.erosion.GetNoise(wx, wz);
     // Ridged fractal: connected crest lines near +1, valleys between them.
     const pv = this.peaksValleys.GetNoise(wx, wz);
-    return (
+    const h =
       this.contSpline.evaluate(c) +
       this.erosionSpline.evaluate(e) * this.pvSpline.evaluate(pv) +
-      detail.amplitude * this.detail.GetNoise(x, z)
-    );
+      detail.amplitude * this.detail.GetNoise(x, z);
+    // Under water: a shelf along the shore (zero slope at the waterline, the full slope
+    // only further out).
+    const { seaLevel, surface } = this.p;
+    const d = seaLevel - h;
+    if (d <= 0 || surface.bedShelf <= 0) return h;
+    return seaLevel - (d * d) / (d + surface.bedShelf);
   }
 
   /** Y of the topmost ground block at a column. */
@@ -252,11 +259,13 @@ export class TerrainGenerator {
         const h = this.h(col, x0, z0, x, z);
         const slope = this.slope(col, x0, z0, x, z);
         const dirtDepth = surface.dirtDepthMin + (hash3(seed, x, SALT_DIRT, z) % dirtRange);
+        // Bed material borders wander with a coherent noise (block-aligned: one type per block).
+        const bedShift = h <= seaLevel ? surface.bedJitter * this.detail.GetNoise(x * BED_NOISE_SCALE, z * BED_NOISE_SCALE) : 0;
         for (let ly = 0; ly < S; ly++) {
           const y = y0 + ly;
           const block =
             y > h ? (y <= seaLevel ? BlockId.water : BlockId.air)
-            : this.groundBlock(h - y, h, slope, dirtDepth);
+            : this.groundBlock(h - y, h, slope, dirtDepth, bedShift);
           data[(ly << LAYER) | (lz << ROW) | lx] = block;
         }
       }
@@ -264,8 +273,14 @@ export class TerrainGenerator {
   }
 
   /** Surface rules for a ground block `depth` blocks below the column top `h`. */
-  private groundBlock(depth: number, h: number, slope: number, dirtDepth: number): number {
+  private groundBlock(depth: number, h: number, slope: number, dirtDepth: number, bedShift: number): number {
     const { seaLevel, surface: s } = this.p;
+    if (h < seaLevel) {
+      // Lake / sea bed by the water depth above it: sand, gravel, then silt.
+      if (depth >= s.bedLayer) return BlockId.stone;
+      const water = seaLevel - h + bedShift;
+      return water <= s.bedSandDepth ? BlockId.sand : water <= s.bedGravelDepth ? BlockId.gravel : BlockId.silt;
+    }
     if (h <= seaLevel + s.beachHeight) return depth < s.sandDepth ? BlockId.sand : BlockId.stone;
     if (h >= s.rockAltitude || slope >= s.stoneSlope) return BlockId.stone;
     if (slope >= s.gravelSlope) return depth < s.gravelDepth ? BlockId.gravel : BlockId.stone;

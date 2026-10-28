@@ -18,6 +18,7 @@
 // traversal shader the extra code cost ~0.5 ms through register pressure alone.
 #include "material.wgsl"
 #include "water.wgsl"
+#include "water-shore.wgsl"
 
 struct LightingParams {
   /// 0 lit, 1 shadow (sun visibility), 2 sky visibility, 3 history length, 4 indirect
@@ -223,11 +224,12 @@ fn waterReflection(px: vec2i) -> vec4f {
 /// surface) and transmission, Beer-Lambert absorption along the view path and single
 /// scattering (isotropic phase) of the refracted sun (`sun_vis`: shadowed at the bottom)
 /// and the sky light under the surface, both attenuated with depth.
-fn waterComposite(px: vec2i, view: vec3f, w: vec4f, bottom: vec3f, sun_vis: f32) -> vec3f {
+fn waterComposite(px: vec2i, view: vec3f, w: vec4f, bottom: vec3f, sun_vis: f32, depth: f32) -> vec3f {
   let n_s = waterSurfaceNormal(w);
   let f_v = fresnelDielectric(dot(-view, n_s), water.ior);
   let d = refract(view, n_s, 1.0 / water.ior);
-  let sigma_t = waterExtinction(water);
+  let medium = waterMedium(depth);
+  let sigma_t = medium.extinction;
   let path = w.y;
   // Depth gained per metre along the refracted view ray.
   let mu_v = max(-dot(d, n_s), 0.0);
@@ -242,7 +244,7 @@ fn waterComposite(px: vec2i, view: vec3f, w: vec4f, bottom: vec3f, sun_vis: f32)
   // Diffuse light: scalar irradiance ≈ planar irradiance × the mean path factor.
   let e_sky = lighting.sky_irradiance * (1.0 - WATER_SKY_FRESNEL) * WATER_DIFFUSE_PATH;
   scatter += e_sky * waterInscatter(sigma_t, mu_v * WATER_DIFFUSE_PATH, path);
-  let transmitted = bottom * exp(-sigma_t * path) + water.scattering * water.scatter_albedo / (4.0 * PI) * scatter * preExposure();
+  let transmitted = bottom * exp(-sigma_t * path) + medium.scatter / (4.0 * PI) * scatter * preExposure();
   let traced = waterReflection(px);
   var reflected = traced.rgb;
   if (traced.a < 0.0) {
@@ -259,7 +261,14 @@ fn waterComposite(px: vec2i, view: vec3f, w: vec4f, bottom: vec3f, sun_vis: f32)
     let spec = fresnelDielectric(dot(v, h), water.ior) * ggxD(max(dot(n_s, h), 0.0), a2) * smithV(cos_l, n_v, a2);
     glint = spec * lighting.light_illuminance * cos_l * select(1.0, traced.a, traced.a >= 0.0) * preExposure();
   }
-  return mix(transmitted, reflected, f_v) + glint;
+  let water_color = mix(transmitted, reflected, f_v) + glint;
+  // Foam where the surface meets the shore: a white surface lit by the sun and the sky.
+  let foam = waterFoam(cam.origin_frac + view * w.x, water.time);
+  if (foam <= 0.0) {
+    return water_color;
+  }
+  let e = lighting.light_illuminance * max(cos_l, 0.0) * sun_vis + lighting.sky_irradiance;
+  return mix(water_color, FOAM_ALBEDO / PI * e * preExposure(), foam);
 }
 
 fn ggxD(n_h: f32, a2: f32) -> f32 {
@@ -323,6 +332,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   }
   var result = vec3f(0.0);
   var sun_vis = 1.0;
+  /// Water above the bottom (metres); deep water (no bottom hit): from the path length.
+  var water_depth = wsample.y * 0.7;
   if (!gbIsSky(g.w)) {
     let albedo_ao = unpack4x8unorm(g.x);
     let surf = unpack4x8unorm(g.z); // roughness, metalness, emission, subsurface
@@ -340,7 +351,12 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     let rel = cam.origin_frac + pos - faceNormal(face_id) * 1e-3;
     let cell_rel = vec3i(floor(rel));
     let dist = select(depth / max(dot(view, cam.forward), 1e-4), wsample.x + wsample.y, under);
-    applyBevel(&worn, materials[gbMaterial(g.w)].flags, cam.origin_cell + cell_rel, face_id, rel - vec3f(cell_rel), dist);
+    let mat_flags = materials[gbMaterial(g.w)].flags;
+    applyBevel(&worn, mat_flags, cam.origin_cell + cell_rel, face_id, rel - vec3f(cell_rel), dist);
+    if (!under && (mat_flags & MATERIAL_NATURAL) != 0u) {
+      // Ground beside the water is wet.
+      applyWetness(&worn, shoreWetness(cam.origin_cell + cell_rel, dist));
+    }
     let albedo = worn.albedo;
     let n = worn.normal;
     let roughness = max(worn.roughness, MIN_ROUGHNESS);
@@ -355,16 +371,17 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     if (under) {
       let n_s = waterSurfaceNormal(wsample);
       v = -refract(view, n_s, 1.0 / water.ior);
-      let sigma_t = waterExtinction(water);
-      let depth_below = max(view.y * wsample.x - pos.y, 0.0);
+      water_depth = max(view.y * wsample.x - pos.y, 0.0);
+      let sigma_t = waterMedium(water_depth).extinction;
       let cos_l = dot(sky.light_dir, n_s);
       l = waterLightDir(sky.light_dir, n_s, water.ior);
-      // The beam narrows as it bends towards the normal: its perpendicular irradiance grows by
-    // cos θ_air / cos θ_water (the flux through the surface is E · cos θ_air). Lighting the
-    // bottom with the refracted cosine alone made it ~4× too bright under a low sun.
-    let mu_w = max(dot(l, n_s), 1e-3);
-    att_direct = (1.0 - fresnelDielectric(cos_l, water.ior)) * max(cos_l, 0.0) / mu_w * exp(-sigma_t * depth_below / mu_w);
-      att_indirect = (1.0 - WATER_SKY_FRESNEL) * exp(-sigma_t * depth_below * WATER_DIFFUSE_PATH);
+      // The beam narrows as it bends towards the normal: its perpendicular irradiance grows
+      // by cos θ_air / cos θ_water (the flux through the surface is E · cos θ_air). Lighting
+      // the bottom with the refracted cosine alone made it ~4× too bright under a low sun.
+      let mu_w = max(dot(l, n_s), 1e-3);
+      let caustics = waterCaustics(vec2f(cam.origin_cell.xz) + cam.origin_frac.xz + pos.xz, water_depth, water.time);
+      att_direct = (1.0 - fresnelDielectric(cos_l, water.ior)) * max(cos_l, 0.0) / mu_w * caustics * exp(-sigma_t * water_depth / mu_w);
+      att_indirect = (1.0 - WATER_SKY_FRESNEL) * exp(-sigma_t * water_depth * WATER_DIFFUSE_PATH);
     }
     let h = normalize(v + l);
     let n_v = max(dot(n, v), 1e-4);
@@ -431,7 +448,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     sun_vis = vis.x;
   }
   if (under && params.mode == 0u) {
-    result = waterComposite(px, view, wsample, result, sun_vis);
+    result = waterComposite(px, view, wsample, result, sun_vis, water_depth);
   }
   if (params.aerial_enabled != 0u) {
     let air_depth = select(textureLoad(gdepth, px, 0).x, wsample.x * dot(view, cam.forward), under);

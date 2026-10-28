@@ -103,10 +103,11 @@ describe('TerrainGenerator', () => {
     const x0 = C0 * S;
     const x1 = (C1 + 1) * S - 1;
 
-    it('applies surface rules: grass over 3-4 dirt over stone on gentle land, sand under water', () => {
+    it('applies surface rules: grass over 3-4 dirt over stone on gentle land, sand / gravel / silt beds under water', () => {
       const { surface } = params;
       let grassColumns = 0;
       let wetColumns = 0;
+      let siltColumns = 0;
       for (let z = x0 + 1; z < x1; z++) {
         for (let x = x0 + 1; x < x1; x++) {
           const h = gen.surfaceY(x, z);
@@ -114,7 +115,13 @@ describe('TerrainGenerator', () => {
           const top = world.getBlock(x, h, z);
           if (h < params.seaLevel) {
             wetColumns++;
-            expect(top).toBe(BlockId.sand);
+            // Bed by water depth (borders shifted by at most ±bedJitter): sand at the
+            // waterline, silt in deep water, gravel between.
+            const water = params.seaLevel - h;
+            expect([BlockId.sand, BlockId.gravel, BlockId.silt]).toContain(top);
+            if (water <= surface.bedSandDepth - surface.bedJitter) expect(top).toBe(BlockId.sand);
+            if (water > surface.bedGravelDepth + surface.bedJitter) expect(top).toBe(BlockId.silt);
+            if (top === BlockId.silt) siltColumns++;
             expect(world.getBlock(x, params.seaLevel, z)).toBe(BlockId.water);
             expect(world.getBlock(x, params.seaLevel + 1, z)).toBe(BlockId.air);
           } else if (h > params.seaLevel + surface.beachHeight && h < surface.rockAltitude && slope < surface.gravelSlope) {
@@ -135,6 +142,7 @@ describe('TerrainGenerator', () => {
       expect(grassColumns).toBeGreaterThan(100);
       // The pinned region contains a lake; without it the underwater rules above went unchecked.
       expect(wetColumns).toBeGreaterThan(MIN_WET_COLUMNS);
+      expect(siltColumns).toBeGreaterThan(0);
     });
 
     it('carves caves below the surface', () => {

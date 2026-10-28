@@ -478,6 +478,13 @@ export class DebugOverlay {
     f.add(w, 'wavelength', 0.2, 8, 0.1).name('longest wavelength (m)');
     f.add(w, 'ripples', 0, 3, 0.05).name('ripples');
     f.add(w, 'level', 0.5, 1, 0.01).name('water level in block');
+    f.add(w, 'turbidity', 0, 2, 0.01).name('turbidity (shallows)');
+    f.add(w, 'turbidityDepth', 0.2, 6, 0.1).name('turbidity fade depth (m)');
+    f.addColor(w, 'sedimentColor').name('sediment colour');
+    f.add(w, 'foam', 0, 1, 0.05).name('foam');
+    f.add(w, 'foamWidth', 0.02, 0.5, 0.01).name('foam width (m)');
+    f.add(w, 'caustics', 0, 2, 0.05).name('caustics');
+    f.add(w, 'wetShore', 0, 1, 0.05).name('wet shore');
     f.close();
   }
 

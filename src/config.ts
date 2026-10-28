@@ -156,6 +156,17 @@ export const config = {
       /** Columns up to seaLevel + beachHeight are sand. */
       beachHeight: 1,
       sandDepth: 3,
+      /** Lake and sea beds by water depth (blocks of water above the ground): sand at the
+       *  waterline up to `bedSandDepth`, gravel up to `bedGravelDepth`, silt deeper — each
+       *  limit shifted per column by up to ±`bedJitter` (coherent noise, so the borders
+       *  wander), `bedLayer` blocks thick over stone. */
+      bedSandDepth: 1,
+      bedGravelDepth: 3,
+      bedJitter: 1.2,
+      bedLayer: 2,
+      /** Lake beds flatten towards the shore: water depth d becomes d² / (d + bedShelf), a
+       *  wide shallow shelf instead of one-block steps down from the waterline (0 = off). */
+      bedShelf: 4,
       /** Above this Y the ground is bare rock. */
       rockAltitude: 200,
     },
@@ -487,6 +498,20 @@ export const config = {
     wavelength: 1.6,
     ripples: 0.5,
     level: 0.9,
+    /** Shore (water-shore.wgsl). Sediment stirred up in the shallows: extra scattering per
+     *  metre at the waterline, fading over `turbidityDepth` metres of depth, in
+     *  `sedimentColor` (brownish) — clear in the middle of the lake. Rain will raise it. */
+    turbidity: 0.35,
+    turbidityDepth: 1.2,
+    sedimentColor: [0.5, 0.38, 0.24] as [number, number, number],
+    /** Foam strip along the shore: strength, mean width (metres). */
+    foam: 0.6,
+    foamWidth: 0.12,
+    /** Moving caustics on the bottom (mean-preserving; fade with depth, none on still water). */
+    caustics: 0.35,
+    /** Ground beside the water darker and smoother (0 = off), within this many blocks. */
+    wetShore: 1,
+    wetMaxDistance: 40,
   },
   /** Global wind: water waves now; rain and foliage later. Direction it blows towards
    *  (degrees, 0 = north / −Z, 90 = east / +X), speed in m/s (≈ 2: calm lake). */

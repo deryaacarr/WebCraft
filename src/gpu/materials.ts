@@ -39,6 +39,7 @@ const CATEGORY_FLAGS: Partial<Record<MaterialName, number>> = {
   gravel: FLAG_NATURAL,
   dirt: FLAG_NATURAL,
   sand: FLAG_NATURAL,
+  silt: FLAG_NATURAL,
   grass_top: FLAG_FOLIAGE,
   grass_side: FLAG_FOLIAGE,
   oak_leaves: FLAG_FOLIAGE | FLAG_MOIST,

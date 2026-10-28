@@ -97,6 +97,8 @@ export const TEXTURE_SPEC: Record<MaterialName, MaterialSpec> = {
   glass: { variants: [{ kind: 'procedural', generator: 'glass', seed: 1 }], rotate: false, pom: false, alphaTest: false },
   torch: { variants: [{ kind: 'procedural', generator: 'torch', seed: 1 }], rotate: false, pom: false, alphaTest: false },
   lava: { variants: [acg('Lava001', 0.5), acg('Lava004', 0.5)], rotate: true, pom: false, alphaTest: false },
+  // Lake-bed sediment: dark, smooth, matte mud (grey fibrous / brown with fine pebbles).
+  silt: { variants: [acg('Ground036', 0.5), acg('Ground051', 0.5)], rotate: true, pom: false, alphaTest: false, world: true },
 };
 
 /** Texture resolutions the packer produces (px per block face). 256 = "Ultra". */
