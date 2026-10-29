@@ -73,6 +73,7 @@ export class ExposurePass implements RenderPass {
     f32[15] = wb.adaptSeconds;
     f32[16] = e.maxDarkAdaptationEv;
     new Uint32Array(p).set([this.gbuffer.width, this.gbuffer.height], 17);
+    f32[19] = e.holdEv;
     this.device.queue.writeBuffer(this.params, 0, p);
 
     const timestampWrites = ctx.profiler.timestampWrites(this.name);

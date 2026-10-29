@@ -39,9 +39,16 @@ struct TaauParams {
   camera_motion: f32,
   /// 1: the history is invalid (resize, first frame).
   reset: u32,
-  _pad0: f32,
-  _pad1: f32,
+  /// Clip box half-size (σ) with the camera still; slides to `gamma` while moving.
+  gamma_still: f32,
+  /// Still camera: the history is kept unclipped unless this frame's 3×3 mean luminance
+  /// is more than this relative distance from it (fully clipped at twice; 0 = always clip).
+  still_tolerance: f32,
 };
+
+/// `moving` below this counts as still (motion vectors of a still camera carry ~1e-7 of
+/// float noise: an exact 0 test never held).
+const STILL: f32 = 0.01;
 
 override WORKGROUP_X: u32 = 8u;
 override WORKGROUP_Y: u32 = 8u;
@@ -51,7 +58,6 @@ override WORKGROUP_Y: u32 = 8u;
 @group(0) @binding(2) var color_in: texture_2d<f32>;
 @group(0) @binding(3) var gdepth: texture_2d<f32>;
 @group(0) @binding(4) var gmotion: texture_2d<f32>;
-@group(0) @binding(5) var gbuffer0: texture_2d<u32>;
 @group(0) @binding(6) var prev_depth: texture_2d<f32>;
 @group(0) @binding(7) var history_in: texture_2d<f32>;
 @group(0) @binding(8) var history_out: texture_storage_2d<rgba16float, write>;
@@ -115,9 +121,16 @@ fn clipToBox(h: vec3f, lo: vec3f, hi: vec3f) -> vec3f {
 /// Colour (rgb) and depth (a) of internal pixel `q` (clamped). Sharing the 3×3
 /// neighbourhoods through workgroup memory was tried: no faster (the texture cache already
 /// serves the neighbours; the barrier and the shared array cost as much).
-fn sampleAt(q: vec2i, in_size: vec2i) -> vec4f {
+struct InternalSample {
+  /// Colour, and the lighting pass's alpha: < 0 seen through water, else the share of
+  /// self-animating light (torch flicker).
+  color: vec4f,
+  depth: f32,
+};
+
+fn sampleAt(q: vec2i, in_size: vec2i) -> InternalSample {
   let c = clamp(q, vec2i(0), in_size - 1);
-  return vec4f(textureLoad(color_in, c, 0).rgb, textureLoad(gdepth, c, 0).x);
+  return InternalSample(textureLoad(color_in, c, 0), textureLoad(gdepth, c, 0).x);
 }
 
 @compute @workgroup_size(WORKGROUP_X, WORKGROUP_Y, 1)
@@ -146,11 +159,16 @@ fn resolve(gid: vec2u, out_size: vec2u, in_size: vec2i) {
   var m2 = vec3f(0.0);
   var nearest = centre;
   var nearest_depth = 1e30;
+  // Share of water among the centre and its edge neighbours: the settings blend between
+  // land and water by it. A yes/no from the centre alone flipped with the jitter along the
+  // shore (32 frames unclipped one frame, 4 frames and a tight box the next).
+  var water_count = 0.0;
+  var animated = 0.0;
   for (var k = 0; k < 9; k++) {
     let o = vec2i(k % 3 - 1, k / 3 - 1);
     let q = clamp(centre + o, vec2i(0), in_size - 1);
     let sample = sampleAt(centre + o, in_size);
-    let c = sample.rgb;
+    let c = sample.color.rgb;
     let d = vec2f(q) - p;
     let w = exp(-dot(d, d) * inv_two_sigma2);
     sum += c * w;
@@ -160,18 +178,25 @@ fn resolve(gid: vec2u, out_size: vec2u, in_size: vec2i) {
     m2 += y * y;
     // Nearest surface among the centre and its four edge neighbours (the corners add
     // little: edges are found by the cross already).
-    if (o.x * o.y == 0 && sample.a < nearest_depth) {
-      nearest_depth = sample.a;
+    if (o.x * o.y == 0) {
+      water_count += select(0.0, 1.0, sample.color.a < 0.0);
+      if (o.x == 0 && o.y == 0) {
+        animated = max(sample.color.a, 0.0);
+      }
+    }
+    if (o.x * o.y == 0 && sample.depth < nearest_depth) {
+      nearest_depth = sample.depth;
       nearest = q;
     }
   }
   let current = sum / max(wsum, 1e-5);
   let mean = m1 / 9.0;
   let sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3f(0.0)));
-  let water = gbThroughWater(textureLoad(gbuffer0, clamp(centre, vec2i(0), in_size - 1), 0).w);
-  let gamma = select(params.gamma, params.gamma_water, water);
+  let water = water_count / 5.0;
 
   let motion = textureLoad(gmotion, nearest, 0).xy;
+  let moving = clamp(params.camera_motion + length(motion * vec2f(in_size)) / 8.0, 0.0, 1.0);
+  let gamma = mix(mix(params.gamma_still, params.gamma, moving), params.gamma_water, water);
   let prev_uv = uv - motion;
   var result = current;
   var frames = 1.0;
@@ -187,7 +212,10 @@ fn resolve(gid: vec2u, out_size: vec2u, in_size: vec2i) {
     let prev_px = clamp(vec2i(prev_uv * vec2f(prev_in)), vec2i(0), prev_in - 1);
     let tolerance = params.depth_tolerance * max(expected, 1.0);
     let sky = nearest_depth >= cam.far * 0.999;
-    var same = sky || abs(textureLoad(prev_depth, prev_px, 0).x - expected) <= tolerance;
+    // With nothing moving no surface can be uncovered: a mismatch is sub-pixel detail last
+    // frame's jitter missed altogether (~2.5 % of far pixels were reset every few frames);
+    // a changed world (a block removed) is left to the colour clip.
+    var same = sky || moving < STILL || abs(textureLoad(prev_depth, prev_px, 0).x - expected) <= tolerance;
     // Last frame's depth was sampled with last frame's jitter: on a silhouette the pixel
     // there may hold the other side of the edge. The surface counts as seen if any pixel
     // of the 3×3 held it (rejecting there reset the history every frame: edges flickered).
@@ -198,9 +226,24 @@ fn resolve(gid: vec2u, out_size: vec2u, in_size: vec2i) {
     if (same) {
       let h = historyCatmullRom(prev_uv);
       let rescale = exposure[0] / max(history_exposure[0], 1e-20);
-      let clipped = ycocgToRgb(clipToBox(rgbToYcocg(h.rgb * rescale), mean - gamma * sigma, mean + gamma * sigma));
-      let moving = clamp(params.camera_motion + length(motion * vec2f(in_size)) / 8.0, 0.0, 1.0);
-      let cap = select(mix(params.frames_still, params.frames_moving, moving), params.frames_water, water);
+      let hist = h.rgb * rescale;
+      var clipped = ycocgToRgb(clipToBox(rgbToYcocg(hist), mean - gamma * sigma, mean + gamma * sigma));
+      // Sub-pixel detail (a block's lit top edge, a thin seam) is missed by every sample of
+      // some jitter offsets: the 3×3 is uniform then, σ ≈ 0, and any box — however loose —
+      // clipped the history's correct partial coverage away (far edges flickered). With
+      // the camera still the history is trusted while the neighbourhood's mean agrees with
+      // it; a real change of light (a torch's flicker) moves the mean and clips as before.
+      // Light that animates by itself (a torch's flicker; the lighting pass's alpha) is
+      // clipped as before. Noise in the lit input (GI, leaves) moves the 3×3 mean by tens
+      // of percent, so only a large jump (the world changed) counts against the history.
+      if (water < 1.0 && params.still_tolerance > 0.0) {
+        let lm = mean.x; // YCoCg luma
+        let lh = rgbToYcocg(hist).x;
+        let dev = abs(lm - lh) / max(max(lm, lh), 1e-4);
+        let trust = (1.0 - water) * (1.0 - moving) * (1.0 - animated) * (1.0 - smoothstep(params.still_tolerance, 2.0 * params.still_tolerance, dev));
+        clipped = mix(clipped, hist, trust);
+      }
+      let cap = mix(mix(params.frames_still, params.frames_moving, moving), params.frames_water, water);
       frames = min(h.a + 1.0, cap);
       // Luminance-weighted blend: bright outliers do not dominate (no fireflies).
       let wc = (1.0 / frames) / (1.0 + luma(current));

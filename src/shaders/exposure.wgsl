@@ -38,7 +38,9 @@ struct ExposureParams {
   /// Active region of the lit image (dynamic resolution renders into part of it).
   active_w: u32,
   active_h: u32,
-  _pad2: f32,
+  /// Hysteresis (EV): the exposure holds while the goal stays within this distance; once
+  /// it leaves, the exposure adapts until it is within a tenth of it.
+  hold_ev: f32,
 };
 
 const MID_GREY: f32 = 0.18;
@@ -51,7 +53,8 @@ fn luminance3(c: vec3f) -> f32 {
 struct ExposureState {
   exposure: f32,
   // Scalars, not a vec3f: a vec3f would be 16-byte aligned and shift everything below.
-  _pad0: f32,
+  /// 1 while adapting, 0 while holding (hold_ev).
+  adapting: f32,
   _pad1: f32,
   _pad2: f32,
   /// Current (adapted) von Kries gains in LMS.
@@ -150,9 +153,18 @@ fn main(@builtin(local_invocation_index) i: u32) {
     let open = MID_GREY / PI * (luminance3(lighting.light_illuminance) * max(sky.light_dir.y, 0.0) + luminance3(lighting.sky_irradiance));
     let limit = params.key * exp2(params.compensation_ev + params.max_dark_adaptation_ev) / max(open, 1e-12);
     let goal = clamp(min(params.key * exp2(params.compensation_ev) / scene, limit), params.min_exposure, params.max_exposure);
-    let tau = select(params.tau_brighter, params.tau_darker, goal > previous);
-    let blend = 1.0 - exp(-params.dt / max(tau, 1e-3));
-    state.exposure = exp2(mix(log2(previous), log2(goal), blend));
+    // Hold still while the goal only wanders a little: the metering moves by a few
+    // hundredths of an EV from frame to frame (jittered samples, lighting noise), and
+    // following it made the whole image breathe — and flicker the quantisation steps of
+    // smooth gradients (lines across the sky).
+    let off = abs(log2(goal) - log2(previous));
+    let adapting = select(off > params.hold_ev, off > 0.1 * params.hold_ev, state.adapting > 0.5);
+    state.adapting = select(0.0, 1.0, adapting);
+    if (adapting) {
+      let tau = select(params.tau_brighter, params.tau_darker, goal > previous);
+      let blend = 1.0 - exp(-params.dt / max(tau, 1e-3));
+      state.exposure = exp2(mix(log2(previous), log2(goal), blend));
+    }
   }
 
   // White balance.

@@ -31,9 +31,63 @@ struct WaveSample {
   normal: vec3f,
 };
 
+/// A component is gone once its wavelength is shorter than this many pixel footprints
+/// (fading from 4× that): water has a short TAAU history, and waves a few pixels long
+/// still shimmered in a distant lake at 4.
+const WAVE_FADE_PIXELS: f32 = 8.0;
+
 /// Fade of a component of wavelength `lambda` for a pixel footprint `footprint` (metres).
 fn waveFade(lambda: f32, footprint: f32) -> f32 {
-  return 1.0 - smoothstep(0.25 * lambda, lambda, 4.0 * footprint);
+  return 1.0 - smoothstep(0.25 * lambda, lambda, WAVE_FADE_PIXELS * footprint);
+}
+
+/// Ripples (normal detail only: the sun's glitter) fade later, at four footprints: near
+/// water keeps its broken, sparkling highlight; once they are sub-pixel the glint turns
+/// into the smooth lobe of waterSlopeVariance. At eight, close water lost its sparkle too.
+const RIPPLE_FADE_PIXELS: f32 = 4.0;
+
+fn rippleFade(size: f32, footprint: f32) -> f32 {
+  return 1.0 - smoothstep(0.25 * size, size, RIPPLE_FADE_PIXELS * footprint);
+}
+
+/// Smallest |dir.y| the footprint stretch uses (at most √20 ≈ 4.5×).
+const FOOTPRINT_MIN_SLANT: f32 = 0.05;
+
+/// Pixel footprint (metres) on the surface for a ray `dir` meeting it at distance `t`: at a
+/// grazing angle the pixel's ellipse is 1/|dir.y| longer along the view than across; the
+/// footprint is the geometric mean of the two axes (the ellipse's area) — the across-view
+/// width alone left sub-pixel waves in far water, the long axis smoothed near water too
+/// (a low camera sees even close water at a grazing angle) and blew the glint into a blob.
+fn waterFootprint(t: f32, dir: vec3f) -> f32 {
+  return max(t, 1.0) * material_params.pixel_spread / sqrt(max(abs(dir.y), FOOTPRINT_MIN_SLANT));
+}
+
+/// Footprints for waterWaves / waterSlopeVariance: x for the swell (waterFootprint), y for
+/// the ripples — the pixel's width across the view only: they make the sun's glitter, and
+/// with the ellipse's stretch even close water (a low camera sees it at a grazing angle)
+/// lost its sparkle to a smooth lobe. They still fade out between ~5 and ~25 m.
+fn waterFootprints(t: f32, dir: vec3f) -> vec2f {
+  return vec2f(waterFootprint(t, dir), max(t, 1.0) * material_params.pixel_spread);
+}
+
+/// Slope variance of the wave and ripple detail faded out at `footprint` (Toksvig-like):
+/// the sun's highlight widens by it, so distant water keeps its glitter path as a broad
+/// lobe instead of sparkling pixels. Mean squared slope of a sine of slope amplitude s: s²/2.
+fn waterSlopeVariance(footprint: vec2f) -> f32 {
+  var v = 0.0;
+  for (var i = 0u; i < WAVE_COUNT; i++) {
+    let lambda = water.wavelength * pow(WAVE_LENGTH_FALLOFF, f32(i));
+    let k = WAVE_TAU / lambda;
+    let s = k * water.wave_amplitude * (lambda / water.wavelength) * (1.0 - waveFade(lambda, footprint.x));
+    v += 0.5 * s * s;
+  }
+  for (var o = 0u; o < 2u; o++) {
+    let size = RIPPLE_SIZE * pow(0.5, f32(o));
+    // Noise gradients are ~±0.5 per unit (see waterWaves): slope amplitude ~ half of it.
+    let s = 0.5 * water.wave_amplitude * WAVE_TAU / size * water.ripple * (1.0 - rippleFade(size, footprint.y));
+    v += 0.5 * s * s;
+  }
+  return v;
 }
 
 fn rotateByAngle(v: vec2f, a: f32) -> vec2f {
@@ -62,7 +116,7 @@ fn waterWaveHeight(xz: vec2f, footprint: f32) -> f32 {
 }
 
 /// Waves at world position `xz` (metres), seen with pixel footprint `footprint`.
-fn waterWaves(xz: vec2f, footprint: f32) -> WaveSample {
+fn waterWaves(xz: vec2f, footprint: vec2f) -> WaveSample {
   var h = 0.0;
   // Gerstner normal: (−Σ D·k·A·cos, 1 − Σ Q·k·A·sin, …) in (x, y, z).
   var nxz = vec2f(0.0);
@@ -70,7 +124,7 @@ fn waterWaves(xz: vec2f, footprint: f32) -> WaveSample {
   var spread = array<f32, 4>(0.0, 0.55, -0.4, 1.0);
   for (var i = 0u; i < WAVE_COUNT; i++) {
     let lambda = water.wavelength * pow(WAVE_LENGTH_FALLOFF, f32(i));
-    let fade = waveFade(lambda, footprint);
+    let fade = waveFade(lambda, footprint.x);
     if (fade <= 0.0) {
       break; // shorter ones fade even more
     }
@@ -89,7 +143,7 @@ fn waterWaves(xz: vec2f, footprint: f32) -> WaveSample {
   let drift = water.wind_dir * water.time * 0.3;
   for (var o = 0u; o < 2u; o++) {
     let size = RIPPLE_SIZE * pow(0.5, f32(o));
-    let fade = waveFade(size, footprint) * water.ripple;
+    let fade = rippleFade(size, footprint.y) * water.ripple;
     if (fade <= 0.0) {
       break;
     }

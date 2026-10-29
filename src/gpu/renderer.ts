@@ -167,6 +167,7 @@ export class Renderer {
     this.profiler.beginFrame();
     if (chain.sky) this.sky.encode(encoder);
     if (config.taau.enabled && !this.taauWasOn) this.taau.invalidate();
+    if (!config.taau.enabled) setLiveContent('taau', false);
     this.taauWasOn = config.taau.enabled;
     for (const pass of chain.passes) {
       if (pass === this.taau && !config.taau.enabled) continue;

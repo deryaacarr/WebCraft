@@ -27,6 +27,7 @@
 #include "material.wgsl"
 #include "sky.wgsl"
 #include "water.wgsl"
+#include "water-waves.wgsl"
 
 struct ReflectionParams {
   max_distance: f32,
@@ -162,11 +163,16 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   cone_start = w.x;
   // GGX D(n·h) / D(1) = (α² / ((n·h)²(α² − 1) + 1))².
   let h = normalize(sky.light_dir - view);
-  let a2 = pow(water.sun_roughness, 4.0);
+  // Wave detail faded out at this distance widens the lobe (lighting.wgsl, same formula).
+  let a2_sun = pow(water.sun_roughness, 4.0);
+  let a2 = a2_sun + waterSlopeVariance(waterFootprints(w.x, view));
   let n_h = max(dot(n_s, h), 0.0);
   let lobe = a2 / (n_h * n_h * (a2 - 1.0) + 1.0);
   var sun_vis = 0.0;
-  if (dot(n_s, sky.light_dir) > 0.0 && lobe * lobe > GLINT_CUTOFF) {
+  // The cutoff is on D itself (D = lobe² / (π α²)): as bright as the dimmest highlight of
+  // the unwidened lobe. Relative to a widened lobe's lower peak, it spread the sun ray over
+  // most of a distant lake (+0.9 ms).
+  if (dot(n_s, sky.light_dir) > 0.0 && lobe * lobe > GLINT_CUTOFF * a2 / a2_sun) {
     sun_vis = sunVisible(surface);
   }
 

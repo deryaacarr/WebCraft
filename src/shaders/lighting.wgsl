@@ -18,6 +18,7 @@
 // traversal shader the extra code cost ~0.5 ms through register pressure alone.
 #include "material.wgsl"
 #include "water.wgsl"
+#include "water-waves.wgsl"
 #include "water-shore.wgsl"
 #include "wetness.wgsl"
 
@@ -268,15 +269,16 @@ fn waterComposite(px: vec2i, view: vec3f, w: vec4f, bottom: vec3f, sun_vis: f32,
   if (cos_l > 0.0) {
     let v = -view;
     let h = normalize(v + sky.light_dir);
-    let a = water.sun_roughness * water.sun_roughness;
-    let a2 = a * a;
+    // GGX α² of the micro-ripples plus the slope variance of the wave detail the primary
+    // faded out at this footprint (Toksvig-like): far water glitters as a broad lobe.
+    let a2 = pow(water.sun_roughness, 4.0) + waterSlopeVariance(waterFootprints(w.x, view));
     let n_v = max(dot(n_s, v), 1e-4);
     let spec = fresnelDielectric(dot(v, h), water.ior) * ggxD(max(dot(n_s, h), 0.0), a2) * smithV(cos_l, n_v, a2);
     glint = spec * lighting.light_illuminance * cos_l * select(1.0, traced.a, traced.a >= 0.0) * preExposure();
   }
   let water_color = mix(transmitted, reflected, f_v) + glint;
   // Foam where the surface meets the shore: a white surface lit by the sun and the sky.
-  let foam = waterFoam(cam.origin_frac + view * w.x, water.time);
+  let foam = waterFoam(cam.origin_frac + view * w.x, water.time, waterFootprint(w.x, view));
   if (foam <= 0.0) {
     return water_color;
   }
@@ -298,7 +300,7 @@ fn lightShafts(view: vec3f, path: f32, surface_y: f32, l_w: vec3f) -> f32 {
     let up = max(surface_y - p.y, 0.0);
     let at_surface = vec2f(cam.origin_cell.xz) + cam.origin_frac.xz + p.xz + l_w.xz / l_w.y * up;
     // The pattern blurs out with the distance the light travelled below the surface.
-    sum += waterCaustics(at_surface, up, water.time);
+    sum += waterCaustics(at_surface, up, water.time, 0.0);
   }
   return mix(1.0, sum / f32(LIGHT_SHAFT_SAMPLES), water.light_shafts);
 }
@@ -402,6 +404,10 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   /// Surface height (camera-relative y): where the ray bent, or above the camera.
   let surface_y = select(view.y * wsample.x, water.camera_surface - cam.origin_frac.y, cam_under && !under);
   var result = vec3f(0.0);
+  // Pre-exposed luminance of light that animates on its own (torch flicker): the output's
+  // alpha carries its share (and marks water), so TAAU keeps clipping there with the
+  // camera still.
+  var animated = 0.0;
   if (gbIsSky(g.w) && exit) {
     // The sky through Snell's window.
     result = skyRadiance(waterBentDir(view, wsample, water.ior));
@@ -474,7 +480,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
       // by cos θ_air / cos θ_water (the flux through the surface is E · cos θ_air). Lighting
       // the bottom with the refracted cosine alone made it ~4× too bright under a low sun.
       let mu_w = max(dot(l, n_s), 1e-3);
-      let caustics = waterCaustics(vec2f(cam.origin_cell.xz) + cam.origin_frac.xz + pos.xz, water_depth, water.time);
+      let caustics = waterCaustics(vec2f(cam.origin_cell.xz) + cam.origin_frac.xz + pos.xz, water_depth, water.time, waterFootprint(length(pos), v));
       att_direct = (1.0 - fresnelDielectric(cos_l, water.ior)) * max(cos_l, 0.0) / mu_w * caustics * exp(-sigma_t * water_depth / mu_w);
       att_indirect = (1.0 - WATER_SKY_FRESNEL) * exp(-sigma_t * water_depth * WATER_DIFFUSE_PATH);
     }
@@ -504,8 +510,10 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     // Emission: the block's radiance concentrated on its glowing texels (surf.z = their
     // emission), so a torch flame is much brighter than the face average.
     let emitter = block_radiance[gbBlockId(g.w)];
-    color += emitter.rgb / max(emitter.a, 1e-3) * surf.z * flick;
+    let emission = emitter.rgb / max(emitter.a, 1e-3) * surf.z * flick;
+    color += emission;
     result = color * preExposure();
+    animated = luminance(emission) * preExposure();
 
     // Indirect light (pre-exposed).
     var indirect = vec3f(0.0);
@@ -520,6 +528,7 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
       // Emissive light flickers here (it was accumulated and denoised without flicker).
       let e_diffuse = gi.diffuse + gi.emissive * flick;
       indirect = (vec3f(1.0) - f_env) * diffuse_color / PI * e_diffuse * ao + f_env * spec_in;
+      animated += luminance(gi.emissive * flick * ((vec3f(1.0) - f_env) * diffuse_color / PI * ao + f_env / PI)) * att_indirect.g;
     } else {
       // Approximation without GI: sky light from above, occluded by the traced sky
       // visibility. The floor and bounce terms are zero unless the non-physical debug-fill
@@ -554,5 +563,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     let air = aerialPerspective(uv, air_depth);
     result = result * air.a + air.rgb;
   }
-  textureStore(output, px, vec4f(result, 1.0));
+  // Alpha (read by TAAU only): seen through water → −1; otherwise the share of light that
+  // animates by itself (torch flicker), 0..1.
+  let animated_share = select(0.0, clamp(animated / max(luminance(result), 1e-6), 0.0, 1.0), params.flicker_amount > 0.0);
+  textureStore(output, px, vec4f(result, select(animated_share, -1.0, under)));
 }

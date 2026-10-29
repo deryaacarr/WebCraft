@@ -32,14 +32,22 @@ fn waterMedium(depth: f32) -> WaterMedium {
   );
 }
 
+/// Foam patch size (metres) and the patches' mean coverage (what they fade to far away).
+const FOAM_PATCH_SIZE: f32 = 0.25;
+const FOAM_PATCH_MEAN: f32 = 0.35;
+
 fn isShoreSolid(id: u32) -> bool {
   return id != 0u && id != WATER_ID;
 }
 
 /// Foam coverage (0..1) at a surface point `s` (camera-cell frame): a thin strip where the
 /// surface meets a solid block of the shore, its width varying along the shore and its
-/// edge broken up by noise drifting with the wind and slowly changing.
-fn waterFoam(s: vec3f, time: f32) -> f32 {
+/// edge broken up by noise drifting with the wind and slowly changing. `footprint`: the
+/// pixel's size there (metres) — far away the strip and its patches were sub-pixel and
+/// shimmered; the strip's edge is at least two footprints soft (its area kept) and the
+/// patches fade to their mean once finer than four pixels (the waves' eight took the
+/// patches from near foam too, leaving an even rim).
+fn waterFoam(s: vec3f, time: f32, footprint: f32) -> f32 {
   if (water.foam <= 0.0) {
     return 0.0;
   }
@@ -59,17 +67,20 @@ fn waterFoam(s: vec3f, time: f32) -> f32 {
   let drift = water.wind_dir * time * 0.15;
   // Width wanders along the shore (~1 m); the strip breaks into patches (~0.2 m).
   let width = water.foam_width * (0.5 + fastNoise(vec3f(world * 1.0, time * 0.1)));
-  let strip = 1.0 - smoothstep(0.0, width, d);
-  let patches = smoothstep(0.42, 0.72, fastNoise(vec3f((world + drift) * 4.0, time * 0.5 + 9.0)));
+  let soft = max(width, 2.0 * footprint);
+  let strip = (1.0 - smoothstep(0.0, soft, d)) * width / soft;
+  let patches = mix(FOAM_PATCH_MEAN, smoothstep(0.42, 0.72, fastNoise(vec3f((world + drift) * 4.0, time * 0.5 + 9.0))), 1.0 - smoothstep(0.25 * FOAM_PATCH_SIZE, FOAM_PATCH_SIZE, 4.0 * footprint));
   return water.foam * strip * patches;
 }
 
 /// Caustics on the bottom at world position `xz`, `depth` metres below the surface: a
 /// multiplier of the direct sun with mean 1 — a bright web of two noise layers drifting
 /// against each other, sharp in the shallows, blurring out with depth, gone on still water.
-fn waterCaustics(xz: vec2f, depth: f32, time: f32) -> f32 {
+/// `footprint`: the pixel's size on the bottom (metres) — the web fades out once it is
+/// finer than a few pixels (waveFade, water-waves.wgsl), leaving its mean (no sparkle).
+fn waterCaustics(xz: vec2f, depth: f32, time: f32, footprint: f32) -> f32 {
   let calm = clamp(water.wave_amplitude / 0.001, 0.0, 1.0);
-  let amount = water.caustics * calm * exp(-max(depth, 0.0) / CAUSTIC_FADE_DEPTH);
+  let amount = water.caustics * calm * exp(-max(depth, 0.0) / CAUSTIC_FADE_DEPTH) * waveFade(CAUSTIC_SIZE, footprint);
   if (amount <= 0.0) {
     return 1.0;
   }

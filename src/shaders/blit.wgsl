@@ -118,6 +118,17 @@ fn display(color: vec3f) -> vec3f {
   return agx(c, params.tonemap == 3u);
 }
 
+/// Triangular-distributed value in (−1, 1), constant per pixel (two integer hashes).
+fn ditherNoise(p: vec2u) -> f32 {
+  var h = (p.x * 0x8da6b343u) ^ (p.y * 0xd8163841u);
+  h = (h ^ (h >> 15u)) * 0x2c1b3c6du;
+  h = (h ^ (h >> 12u)) * 0x297a2d39u;
+  h ^= h >> 15u;
+  let a = f32(h & 0xffffu) / 65535.0;
+  let b = f32(h >> 16u) / 65535.0;
+  return a - b;
+}
+
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4f {
   let uv = min(in.uv * params.uv_scale, params.uv_max);
@@ -137,5 +148,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4f {
     c = clamp((c + k * (n + s + w + e)) / (1.0 + 4.0 * k), vec3f(0.0), vec3f(1.0));
   }
   // Scene textures are linear; the swap chain is a plain (non-sRGB) format.
-  return vec4f(linearToSrgb(c), 1.0);
+  // Static dither (±½ step of the 8-bit target, triangular, fixed per pixel): a smooth
+  // gradient's quantisation step is a long line (across the sky), and any tiny change of
+  // the value flipped the whole line; dithered, it breaks into scattered pixels.
+  let d = ditherNoise(vec2u(in.position.xy)) / 255.0;
+  return vec4f(linearToSrgb(c) + d, 1.0);
 }

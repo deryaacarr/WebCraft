@@ -139,7 +139,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3u, @builtin(workgroup_id) 
       }
       t_s = t;
       let s = cam.origin_frac + dir * t;
-      n_s = waterWaves(vec2f(cam.origin_cell.xz) + s.xz, t * material_params.pixel_spread).normal;
+      n_s = waterWaves(vec2f(cam.origin_cell.xz) + s.xz, vec2f(t * material_params.pixel_spread)).normal;
     }
     var out_dir = refract(dir, -n_s, water.ior);
     let tir = all(out_dir == vec3f(0.0));
@@ -341,11 +341,11 @@ fn surface(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lid:
     return;
   }
   let rest_y = f32(cell_rel.y) + water.level;
-  let footprint = max(t_hit, 1.0) * material_params.pixel_spread;
+  let footprint = waterFootprints(t_hit, dir);
   var t = max(t_hit, (rest_y - cam.origin_frac.y) / dir.y);
   for (var k = 0; k < WAVE_ITERATIONS; k++) {
     let s = cam.origin_frac + dir * t;
-    t = max(t_hit, (rest_y + waterWaveHeight(vec2f(cam.origin_cell.xz) + s.xz, footprint) - cam.origin_frac.y) / dir.y);
+    t = max(t_hit, (rest_y + waterWaveHeight(vec2f(cam.origin_cell.xz) + s.xz, footprint.x) - cam.origin_frac.y) / dir.y);
   }
   // The air between the top face and the surface: crossing into a cell that is neither
   // air nor water (a shore block) means the ray hits that block, not the water.

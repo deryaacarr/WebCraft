@@ -62,10 +62,19 @@ export const config = {
   taau: {
     enabled: true,
     outputScale: 0.75 as 1 | 0.75 | 0.5,
-    framesStill: 12,
+    framesStill: 64,
     framesMoving: 5,
     framesWater: 4,
     gamma: 1.25,
+    /** Clip box with the camera still (sub-pixel detail differs from jitter to jitter: a
+     *  tight box clipped the history towards each frame's samples — far edges shimmered);
+     *  slides to `gamma` as the camera or the pixel moves. */
+    gammaStill: 3,
+    /** Still camera: the history is kept unclipped (sub-pixel edges and lighting noise
+     *  stop flickering) unless the neighbourhood's mean luminance jumps by more than this
+     *  relative amount (fully clipped at twice: the world changed). Light that animates by
+     *  itself (torch flicker, the lit image's alpha) is always clipped. 0 = always clip. */
+    stillTolerance: 0.5,
     gammaWater: 0.8,
     depthTolerance: 0.05,
     sharpness: 0.35,
@@ -82,7 +91,7 @@ export const config = {
     dynamic: {
       enabled: true,
       targetMs: 16,
-      minScale: 0.35,
+      minScale: 0.4,
       maxScale: 0.6,
     },
     /** Tone mapper for the lit view (ACES fit = the stage 7 reference look; AgX options). */
@@ -421,8 +430,9 @@ export const config = {
     },
   },
   lighting: {
-    /** Visibility history cap (frames) for a still camera / a fast-moving one. */
-    historyStill: 16,
+    /** Visibility history cap (frames) for a still camera / a fast-moving one (32: still
+     *  distant shadows no longer shimmer). */
+    historyStill: 32,
     historyMoving: 4,
     /** Screen motion (pixels per frame) at which a pixel counts as fully moving. */
     historyMotionPixels: 8,
@@ -626,6 +636,10 @@ export const config = {
     key: 0.18,
     /** Manual correction in EV (stops). */
     compensation: 0,
+    /** Hysteresis (EV): the exposure holds while the metered goal stays this close
+     *  (frame-to-frame metering noise ~0.05 EV made the image breathe and the sky's
+     *  gradient steps flicker); beyond it, it adapts as below. 0 = always follow. */
+    holdEv: 0.15,
     /** Adaptation time constants (s): scene getting darker (eyes open up) / brighter. */
     adaptDarkerSeconds: 3.5,
     adaptBrighterSeconds: 0.5,

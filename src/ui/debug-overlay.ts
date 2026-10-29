@@ -189,10 +189,12 @@ export class DebugOverlay {
     render.add(t, 'enabled').name('TAAU (temporal upsampling)');
     render.add(t, 'outputScale', { '1.0 (canvas)': 1, '0.75': 0.75, '0.5': 0.5 }).name('TAAU output scale').onChange(() => hooks.onResolutionChange());
     render.add(t, 'sharpness', 0, 1, 0.05).name('TAAU sharpening');
-    render.add(t, 'framesStill', 2, 32, 1).name('TAAU history (still)');
+    render.add(t, 'framesStill', 2, 128, 1).name('TAAU history (still)');
     render.add(t, 'framesMoving', 1, 16, 1).name('TAAU history (moving)');
     render.add(t, 'framesWater', 1, 16, 1).name('TAAU history (water)');
-    render.add(t, 'gamma', 0.5, 3, 0.05).name('TAAU clip box (σ)');
+    render.add(t, 'gammaStill', 0.5, 4, 0.05).name('TAAU clip box still (σ)');
+    render.add(t, 'gamma', 0.5, 3, 0.05).name('TAAU clip box moving (σ)');
+    render.add(t, 'stillTolerance', 0, 0.5, 0.01).name('TAAU still: keep history within');
     render.add(t, 'gammaWater', 0.25, 3, 0.05).name('TAAU clip box on water (σ)');
 
     const gradient = this.gui.addFolder('Test gradient');
@@ -306,6 +308,7 @@ export class DebugOverlay {
     const f = this.gui.addFolder('Exposure & colour');
     f.add(config.render, 'tonemapper', { AgX: 'agx', 'AgX punchy': 'agx-punchy', ACES: 'aces' }).name('tone mapper');
     f.add(e, 'compensation', -5, 5, 0.1).name('exposure compensation (EV)');
+    f.add(e, 'holdEv', 0, 0.5, 0.01).name('hold within (EV)');
     f.add(e, 'adaptDarkerSeconds', 0.1, 10, 0.1).name('adapt to dark (s)');
     f.add(e, 'adaptBrighterSeconds', 0.1, 10, 0.1).name('adapt to bright (s)');
     f.add(e, 'centerSigma', 0, 2, 0.05).name('metering centre weight σ (0 = off)');

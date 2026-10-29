@@ -1,4 +1,5 @@
 import { config } from '../../config';
+import { setLiveContent } from '../../core/power';
 import type { GBuffer } from '../gbuffer';
 import { createShaderModule } from '../shader';
 import type { FrameContext, RenderPass } from './pass';
@@ -23,6 +24,8 @@ export class TaauPass implements RenderPass {
   private history: [GPUTexture, GPUTexture] | null = null;
   private prevDepth: GPUTexture | null = null;
   private cur = 0;
+  /** Frames the camera has been still (the still history fills up over framesStill). */
+  private stillFrames = 0;
   /** The history is invalid until the next frame wrote it (resize, re-enabled). */
   private reset = true;
   private groups = new Map<string, GPUBindGroup>();
@@ -110,7 +113,6 @@ export class TaauPass implements RenderPass {
           { binding: 2, resource: color.createView() },
           { binding: 3, resource: g.depth.createView() },
           { binding: 4, resource: g.motion.createView() },
-          { binding: 5, resource: g.gbuffer0.createView() },
           { binding: 6, resource: this.prevDepth.createView() },
           { binding: 7, resource: read.createView() },
           { binding: 8, resource: write.createView() },
@@ -125,12 +127,21 @@ export class TaauPass implements RenderPass {
     const c = ctx.camera;
     const l = config.lighting;
     // How fast the camera moves this frame (0 still … 1 fast), as for the visibility history.
-    const turn = Math.acos(Math.min(1, c.forward[0] * c.prevForward[0] + c.forward[1] * c.prevForward[1] + c.forward[2] * c.prevForward[2]));
+    // Angle from the chord (exactly 0 for equal vectors; acos of a dot product rounding to
+    // 0.99999994 read 0.02°, enough to count a still camera as moving).
+    const chord = Math.hypot(c.forward[0] - c.prevForward[0], c.forward[1] - c.prevForward[1], c.forward[2] - c.prevForward[2]);
+    const turn = 2 * Math.asin(Math.min(1, chord / 2));
     const cameraMotion = Math.min(1, Math.hypot(...c.prevDelta) / l.historyCameraSpeed + (turn * 180) / Math.PI / l.historyCameraTurn);
     const p = new ArrayBuffer(PARAMS_SIZE);
     const f = new Float32Array(p);
     f.set([c.jitter[0], c.jitter[1], t.framesStill, t.framesMoving, t.gamma, t.gammaWater, t.framesWater, t.depthTolerance, cameraMotion]);
     new Uint32Array(p)[9] = this.reset ? 1 : 0;
+    // Settling: while the still history has not filled up, the image is still sharpening
+    // — animated content for the idle frame rate (power.ts), so it settles at full rate.
+    this.stillFrames = this.reset || cameraMotion > 0 ? 0 : this.stillFrames + 1;
+    setLiveContent('taau', this.stillFrames < t.framesStill);
+    f[10] = t.gammaStill;
+    f[11] = t.stillTolerance;
     this.device.queue.writeBuffer(this.params, 0, p);
     this.reset = false;
 
