@@ -21,7 +21,9 @@
 #include "gbuffer.wgsl"
 
 struct TaauParams {
-  /// This frame's jitter (internal pixels): sample (i, j) sits at (i, j) + 0.5 + jitter.
+  /// This frame's jitter (internal pixels). The jittered projection moves the image by
+  /// +jitter (math.ts jitterProjection), so sample (i, j) sees the scene at
+  /// (i, j) + 0.5 − jitter of the unjittered image.
   jitter: vec2f,
   /// History cap (frames) when still / when the camera moves fast.
   frames_still: f32,
@@ -130,7 +132,8 @@ fn resolve(gid: vec2u, out_size: vec2u, in_size: vec2i) {
     return;
   }
   let uv = (vec2f(gid) + 0.5) / vec2f(out_size);
-  let p = uv * vec2f(in_size) - 0.5 - params.jitter;
+  // Output pixel in sample-index space: sample q sits at q + 0.5 − jitter.
+  let p = uv * vec2f(in_size) - 0.5 + params.jitter;
   let centre = vec2i(round(p));
   // Gaussian falloff wide enough to cover the gaps between samples when upscaling.
   let scale = max(f32(out_size.x) / f32(in_size.x), 1.0);
@@ -174,12 +177,21 @@ fn resolve(gid: vec2u, out_size: vec2u, in_size: vec2i) {
   let inside = all(prev_uv >= vec2f(0.0)) && all(prev_uv < vec2f(1.0));
   if (params.reset == 0u && inside) {
     // Disocclusion: the nearest sample's surface, reprojected, must match last frame's depth.
-    let q_uv = (vec2f(nearest) + 0.5 + params.jitter) / vec2f(in_size);
+    // Pixel centre through the jittered inverse: exactly the ray this sample traced.
+    let q_uv = (vec2f(nearest) + 0.5) / vec2f(in_size);
     let rel = viewRelativePosition(rayDir(cam.inv_view_proj, q_uv), cam.forward, nearest_depth);
     let expected = dot(rel + cam.prev_delta, cam.prev_forward);
-    let found = textureLoad(prev_depth, clamp(vec2i(prev_uv * vec2f(in_size)), vec2i(0), in_size - 1), 0).x;
+    let prev_px = clamp(vec2i(prev_uv * vec2f(in_size)), vec2i(0), in_size - 1);
+    let tolerance = params.depth_tolerance * max(expected, 1.0);
     let sky = nearest_depth >= cam.far * 0.999;
-    let same = sky || abs(found - expected) <= params.depth_tolerance * max(expected, 1.0);
+    var same = sky || abs(textureLoad(prev_depth, prev_px, 0).x - expected) <= tolerance;
+    // Last frame's depth was sampled with last frame's jitter: on a silhouette the pixel
+    // there may hold the other side of the edge. The surface counts as seen if any pixel
+    // of the 3×3 held it (rejecting there reset the history every frame: edges flickered).
+    for (var k = 0; k < 9 && !same; k++) {
+      let t = clamp(prev_px + vec2i(k % 3 - 1, k / 3 - 1), vec2i(0), in_size - 1);
+      same = abs(textureLoad(prev_depth, t, 0).x - expected) <= tolerance;
+    }
     if (same) {
       let h = historyCatmullRom(prev_uv);
       let rescale = exposure[0] / max(history_exposure[0], 1e-20);
