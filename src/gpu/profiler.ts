@@ -19,6 +19,9 @@ export class GpuProfiler {
   readonly timings = new Map<string, number>();
   /** Smoothed sum of all passes in milliseconds. */
   totalMs = 0;
+  /** Called with each measured frame's GPU span (first pass start → last pass end, ms):
+   *  unlike the sum of passes it does not count the waits between them twice. */
+  onFrame: ((spanMs: number) => void) | null = null;
 
   private readonly maxPasses: number;
   private readonly querySet: GPUQuerySet | null = null;
@@ -108,9 +111,15 @@ export class GpuProfiler {
   private record(names: string[], times: BigInt64Array): void {
     const alpha = 1 / Math.max(1, config.debug.profilerSmoothing);
     let total = 0;
+    let first = -1n;
+    let last = -1n;
     names.forEach((name, i) => {
       const begin = times[i * 2] ?? 0n;
       const end = times[i * 2 + 1] ?? 0n;
+      if (end > begin && begin > 0n) {
+        if (first < 0n || begin < first) first = begin;
+        if (end > last) last = end;
+      }
       // Some drivers return 0 or out-of-order values for a pass; treat as 0.
       const ms = end > begin ? Number(end - begin) / NS_PER_MS : 0;
       total += ms;
@@ -118,5 +127,6 @@ export class GpuProfiler {
       this.timings.set(name, prev === undefined ? ms : prev + (ms - prev) * alpha);
     });
     this.totalMs = this.totalMs === 0 ? total : this.totalMs + (total - this.totalMs) * alpha;
+    if (first >= 0n && last > first) this.onFrame?.(Number(last - first) / NS_PER_MS);
   }
 }

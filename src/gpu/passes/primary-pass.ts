@@ -8,8 +8,8 @@ import { traceConstants } from '../trace-constants';
 import type { WaterSystem } from '../water';
 import type { FrameContext, RenderPass } from './pass';
 
-// Camera struct in camera.wgsl: 3 × mat4x4f (192 B) + 6 × 16 B.
-const CAMERA_SIZE = 288;
+// Camera struct in camera.wgsl: 3 × mat4x4f (192 B) + 7 × 16 B.
+const CAMERA_SIZE = 304;
 const DEG = Math.PI / 180;
 /** u32 words before the tile marks in the tile list buffer (primary.wgsl TILE_HEADER). */
 const TILE_HEADER = 4;
@@ -259,6 +259,8 @@ export class PrimaryPass implements RenderPass {
     u32[67] = config.trace.prepassMaxSteps;
     f32.set(cam.prevForward, 68);
     u32[71] = cam.frameIndex;
+    u32[72] = this.gbuffer.prevWidth;
+    u32[73] = this.gbuffer.prevHeight;
     this.device.queue.writeBuffer(this.camera, 0, this.cameraData);
     this.water.update(ctx.time);
 
@@ -277,7 +279,8 @@ export class PrimaryPass implements RenderPass {
       pass.setBindGroup(0, this.prepassBindGroup);
       // The prepass reads only pointers (params + grid), never voxels.
       pass.setBindGroup(1, this.brickmap.bindGroup(this.prepassLayout, [0, 1]));
-      pass.dispatchWorkgroups(Math.ceil(this.coarse.width / this.workgroup[0]), Math.ceil(this.coarse.height / this.workgroup[1]));
+      // Only the tiles of the active region (dynamic resolution).
+      pass.dispatchWorkgroups(Math.ceil(Math.ceil(this.gbuffer.width / tile) / this.workgroup[0]), Math.ceil(Math.ceil(this.gbuffer.height / tile) / this.workgroup[1]));
     }
     const groups = [Math.ceil(this.gbuffer.width / this.workgroup[0]), Math.ceil(this.gbuffer.height / this.workgroup[1])] as const;
     if (under && this.underwaterGroup) {

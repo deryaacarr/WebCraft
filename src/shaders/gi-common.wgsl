@@ -59,6 +59,9 @@ struct GiParams {
   screen_reuse: u32,
   /// GI grid divisor: GI pixel p stands for full-res pixel p · scale.
   scale: u32,
+  /// Last frame's active sizes (dynamic resolution): where the GI histories' pixels are.
+  prev_half_size: vec2u,
+  prev_full_size: vec2u,
 };
 
 const GI_PI: f32 = 3.14159265358979;

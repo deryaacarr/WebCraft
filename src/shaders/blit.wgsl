@@ -24,6 +24,11 @@ struct BlitParams {
   punchy_saturation: f32,
   /// CAS-like sharpening after tone mapping (0 = off; the TAAU output).
   sharpness: f32,
+  /// Source region (dynamic resolution renders into part of an internal-resolution
+  /// source): uv scale, and the largest uv sampled (half a texel inside the region — the
+  /// bilinear filter must not pick up stale pixels beyond it).
+  uv_scale: vec2f,
+  uv_max: vec2f,
 };
 
 /// Exposure pass state (exposure.wgsl): only the white-balance matrix is used here.
@@ -115,15 +120,16 @@ fn display(color: vec3f) -> vec3f {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4f {
-  var c = display(textureSample(source, source_sampler, in.uv).rgb);
+  let uv = min(in.uv * params.uv_scale, params.uv_max);
+  var c = display(textureSample(source, source_sampler, uv).rgb);
   if (params.sharpness > 0.0) {
     // Contrast-adaptive sharpening (after AMD CAS): a negative-lobe cross filter whose
     // strength drops where the neighbourhood is already contrasty (no ringing, no halos).
     let texel = 1.0 / vec2f(textureDimensions(source));
-    let n = display(textureSampleLevel(source, source_sampler, in.uv + vec2f(0.0, -texel.y), 0.0).rgb);
-    let s = display(textureSampleLevel(source, source_sampler, in.uv + vec2f(0.0, texel.y), 0.0).rgb);
-    let w = display(textureSampleLevel(source, source_sampler, in.uv + vec2f(-texel.x, 0.0), 0.0).rgb);
-    let e = display(textureSampleLevel(source, source_sampler, in.uv + vec2f(texel.x, 0.0), 0.0).rgb);
+    let n = display(textureSampleLevel(source, source_sampler, min(uv + vec2f(0.0, -texel.y), params.uv_max), 0.0).rgb);
+    let s = display(textureSampleLevel(source, source_sampler, min(uv + vec2f(0.0, texel.y), params.uv_max), 0.0).rgb);
+    let w = display(textureSampleLevel(source, source_sampler, min(uv + vec2f(-texel.x, 0.0), params.uv_max), 0.0).rgb);
+    let e = display(textureSampleLevel(source, source_sampler, min(uv + vec2f(texel.x, 0.0), params.uv_max), 0.0).rgb);
     let lo = min(c, min(min(n, s), min(w, e)));
     let hi = max(c, max(max(n, s), max(w, e)));
     let amp = sqrt(clamp(min(lo, 1.0 - hi) / max(hi, vec3f(1e-4)), vec3f(0.0), vec3f(1.0)));

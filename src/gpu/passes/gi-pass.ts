@@ -13,7 +13,7 @@ import type { WaterSystem } from '../water';
 import type { FrameContext, RenderPass } from './pass';
 
 // GiParams in gi-common.wgsl: 32 scalars.
-const PARAMS_SIZE = 128;
+const PARAMS_SIZE = 144;
 const BLUE_NOISE_URL = `${import.meta.env.BASE_URL}blue-noise.bin`;
 const BLUE_NOISE = { size: 64, slices: 16 };
 
@@ -72,7 +72,9 @@ export class GiPass implements RenderPass {
     filtEmissive: GPUTexture[];
   } | null = null;
   private groups: Record<'prepare' | 'spatial' | 'trace' | 'temporal' | 'variance', GPUBindGroup[]> | null = null;
+  /** Active GI grid this frame (dynamic resolution), allocated grid. */
   private halfSize: [number, number] = [0, 0];
+  private allocHalf: [number, number] = [0, 0];
   private divisor = 0;
   /** Called after the GI textures were re-created outside a renderer resize. */
   onResize: (() => void) | null = null;
@@ -163,6 +165,7 @@ export class GiPass implements RenderPass {
     const hw = Math.ceil(width / div);
     const hh = Math.ceil(height / div);
     this.halfSize = [hw, hh];
+    this.allocHalf = [hw, hh];
     const make = (label: string, format: GPUTextureFormat) =>
       this.device.createTexture({
         label: `gi-${label}`,
@@ -196,9 +199,11 @@ export class GiPass implements RenderPass {
     if (!t || !this.groups || !config.gi.enabled) return;
     if (config.gi.resolutionDivisor !== this.divisor) {
       // GI grid changed: rebuild the textures (the lighting pass follows via labels).
-      this.resize(this.gbuffer.width, this.gbuffer.height);
+      this.resize(this.gbuffer.allocWidth, this.gbuffer.allocHeight);
       this.onResize?.();
     }
+    // Active GI grid of the active region (dynamic resolution).
+    this.halfSize = [Math.min(Math.ceil(this.gbuffer.width / this.divisor), this.allocHalf[0]), Math.min(Math.ceil(this.gbuffer.height / this.divisor), this.allocHalf[1])];
     this.updateLights(ctx);
     this.writeParams(ctx);
     this.cur = 1 - this.cur;
@@ -444,6 +449,8 @@ export class GiPass implements RenderPass {
     f[29] = gi.specularRoughnessSigma;
     u[30] = gi.screenReuse && this.prevLit() ? 1 : 0;
     u[31] = this.divisor;
+    const g = this.gbuffer;
+    u.set([Math.ceil(g.prevWidth / this.divisor), Math.ceil(g.prevHeight / this.divisor), g.prevWidth, g.prevHeight], 32);
     this.device.queue.writeBuffer(this.params, 0, buf);
 
     // Emitted radiance per block: black-body colour × configured mean radiance (rgb) and

@@ -36,8 +36,22 @@ export class BlitPass implements RenderPass {
     this.device.queue.writeBuffer(this.params, 0, data);
   }
 
+  private regionKey = '';
+
+  /** Samples only the top-left `width` × `height` texels of the source (`width` = its full
+   *  width: all of it) — dynamic resolution renders into part of the internal targets. */
+  setRegion(width: number, height: number, sourceWidth: number, sourceHeight: number): void {
+    const key = `${width},${height},${sourceWidth},${sourceHeight}`;
+    if (key === this.regionKey) return;
+    this.regionKey = key;
+    const sx = width / sourceWidth;
+    const sy = height / sourceHeight;
+    this.device.queue.writeBuffer(this.params, 16, new Float32Array([sx, sy, sx - 0.5 / sourceWidth, sy - 0.5 / sourceHeight]));
+  }
+
   async init(): Promise<void> {
-    this.params = this.device.createBuffer({ label: `${this.name}-params`, size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.params = this.device.createBuffer({ label: `${this.name}-params`, size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.device.queue.writeBuffer(this.params, 16, new Float32Array([1, 1, 1, 1]));
     const module = await createShaderModule(this.device, 'blit.wgsl');
     this.pipeline = await this.device.createRenderPipelineAsync({
       label: this.name,

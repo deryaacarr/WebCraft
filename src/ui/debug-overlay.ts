@@ -36,6 +36,8 @@ export interface DebugOverlayHooks {
   onResolutionChange(): void;
   /** Current world streaming counters; only polled while the overlay is visible. */
   worldStats(): WorldDebugStats;
+  /** This frame's internal render scale (dynamic resolution or the fixed one). */
+  renderScale(): number;
   /** Discards the world and regenerates it from `config.terrain`. */
   onRegenerate(): void;
   /** GPU brickmap memory and brick counters; polled while the overlay is visible. */
@@ -82,6 +84,7 @@ export class DebugOverlay {
   private readonly timingFolder: GUI;
   private readonly timingValues: Record<string, string> = {};
   private visible = config.debug.visibleOnStart;
+  private readonly renderValues = { scale: '0' };
   private readonly worldValues = {
     loaded: 0,
     inFlight: 0,
@@ -167,9 +170,16 @@ export class DebugOverlay {
     sim.add(config.sim, 'maxFrameTime', 0.05, 1, 0.01).name('max frame (s)');
 
     const render = this.gui.addFolder('Render');
+    const dyn = config.render.dynamic;
+    render.add(dyn, 'enabled').name('dynamic resolution');
+    render.add(dyn, 'targetMs', 8, 33, 0.5).name('dynamic: target GPU (ms)');
+    render.add(dyn, 'minScale', 0.25, 1, 0.025).name('dynamic: min scale');
+    // The targets are allocated at the largest reachable scale.
+    render.add(dyn, 'maxScale', 0.25, 1, 0.025).name('dynamic: max scale').onFinishChange(() => hooks.onResolutionChange());
+    render.add(this.renderValues, 'scale').name('current scale').disable().listen();
     render
       .add(config.render, 'renderScale', 0.25, 2, 0.05)
-      .name('render scale')
+      .name('render scale (fixed)')
       .onFinishChange(() => hooks.onResolutionChange());
     render
       .add(config.render, 'maxPixelRatio', 0.5, 4, 0.25)
@@ -241,6 +251,7 @@ export class DebugOverlay {
     const now = performance.now();
     if (now - this.lastWorldStatsUpdate < config.debug.worldStatsIntervalMs) return;
     this.lastWorldStatsUpdate = now;
+    this.renderValues.scale = this.hooks.renderScale().toFixed(3);
     const s = this.hooks.worldStats();
     this.worldValues.loaded = s.loaded;
     this.worldValues.inFlight = s.inFlight;

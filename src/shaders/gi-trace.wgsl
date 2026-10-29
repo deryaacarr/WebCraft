@@ -170,7 +170,8 @@ fn screenRadiance(rel: vec3f) -> vec4f {
   if (any(prev_uv < vec2f(0.0)) || any(prev_uv >= vec2f(1.0))) {
     return vec4f(0.0);
   }
-  let lit = textureLoad(prev_lit, vec2i(prev_uv * vec2f(params.full_size)), 0).rgb;
+  // Last frame's image is at last frame's active size (dynamic resolution).
+  let lit = textureLoad(prev_lit, min(vec2i(prev_uv * vec2f(params.prev_full_size)), vec2i(params.prev_full_size) - 1), 0).rgb;
   return vec4f(lit / max(history_exposure[0], 1e-20), 1.0);
 }
 

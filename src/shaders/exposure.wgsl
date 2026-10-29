@@ -35,8 +35,9 @@ struct ExposureParams {
   /// (lit by the dominant light and the whole sky): caves at noon stay dark, while at
   /// night — when the open itself is dark — the full range is available.
   max_dark_adaptation_ev: f32,
-  _pad0: f32,
-  _pad1: f32,
+  /// Active region of the lit image (dynamic resolution renders into part of it).
+  active_w: u32,
+  active_h: u32,
   _pad2: f32,
 };
 
@@ -102,8 +103,8 @@ fn main(@builtin(local_invocation_index) i: u32) {
   }
   workgroupBarrier();
 
-  let size = vec2f(textureDimensions(hdr));
-  let gsize = vec2f(textureDimensions(gbuffer0));
+  let size = vec2f(f32(params.active_w), f32(params.active_h));
+  let gsize = size;
   let count = GRID.x * GRID.y;
   for (var k = i; k < count; k += THREADS) {
     let cell = (vec2f(f32(k % GRID.x), f32(k / GRID.x)) + 0.5) / vec2f(GRID);

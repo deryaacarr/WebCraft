@@ -148,7 +148,7 @@ export class LightingPass implements RenderPass {
     new Uint32Array(p)[11] = giOn && this.gi.outputs ? 1 : 0;
     new Float32Array(p)[12] = config.gi.specularThreshold;
     new Float32Array(p)[13] = config.gi.planeTolerance;
-    new Float32Array(p).set([l.flicker.amount, l.flicker.speed, l.flicker.scale, config.gi.resolutionDivisor], 14);
+    new Float32Array(p).set([l.flicker.amount, l.flicker.speed, l.flicker.scale, config.gi.resolutionDivisor, Math.max(1, Math.round(config.water.reflectionScale))], 14);
     this.device.queue.writeBuffer(this.params, 0, p);
 
     const timestampWrites = ctx.profiler.timestampWrites(this.name);
@@ -159,7 +159,8 @@ export class LightingPass implements RenderPass {
     pass.setBindGroup(1, this.brickmap.bindGroup(variant.layouts[1]!, [0, 1, 2]));
     // Worn edges: params, material table, block table, noise volume, sampler.
     pass.setBindGroup(2, this.materials.bindGroup(variant.layouts[2]!, [0, 1, 2, 6, 10]));
-    pass.dispatchWorkgroups(Math.ceil(this.output.width / this.workgroup[0]), Math.ceil(this.output.height / this.workgroup[1]));
+    // The active region (dynamic resolution renders into part of the targets).
+    pass.dispatchWorkgroups(Math.ceil(g.width / this.workgroup[0]), Math.ceil(g.height / this.workgroup[1]));
     pass.end();
   }
 }

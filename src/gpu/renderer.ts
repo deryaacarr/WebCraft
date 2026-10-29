@@ -12,6 +12,7 @@ import { LightingPass } from './passes/lighting-pass';
 import { VisibilityPass } from './passes/visibility-pass';
 import { WaterReflectionPass } from './passes/water-reflection-pass';
 import { TaauPass } from './passes/taau-pass';
+import { DynamicResolution } from './dynamic-resolution';
 import type { SkySystem } from './sky';
 import { CanvasSize } from './canvas-size';
 import type { GpuContext } from './device';
@@ -50,6 +51,8 @@ export class Renderer {
   private readonly reflection: WaterReflectionPass;
   private readonly taau: TaauPass;
   private taauWasOn = config.taau.enabled;
+  /** Render scale controller (config.render.dynamic). */
+  readonly dynamic = new DynamicResolution(config.render.renderScale);
   private readonly exposure: ExposurePass;
   private lastTime: number | null = null;
   private readonly allPasses: RenderPass[];
@@ -73,6 +76,7 @@ export class Renderer {
   ) {
     const { device } = gpu;
     this.profiler = new GpuProfiler(device, gpu.timestampQuery);
+    this.profiler.onFrame = (ms) => this.dynamic.update(ms, performance.now() / 1000, config.render.dynamic);
     this.size = new CanvasSize(canvas, device.limits.maxTextureDimension2D);
     this.gbuffer = new GBuffer(device);
     const water = new WaterSystem(device);
@@ -146,6 +150,13 @@ export class Renderer {
 
     const { device } = this.gpu;
     const encoder = device.createCommandEncoder({ label: 'frame' });
+    // Active region this frame (dynamic resolution renders into part of the targets).
+    const scale = this.currentScale();
+    this.gbuffer.setActive(Math.round(this.size.width * scale), Math.round(this.size.height * scale));
+    const internal = chain === this.chains.visibility || chain === this.chains.gbuffer || (chain === this.chains.lit && !config.taau.enabled);
+    const src = chain.output();
+    if (internal && src) this.blit.setRegion(this.gbuffer.width, this.gbuffer.height, src.width, src.height);
+    else if (src) this.blit.setRegion(src.width, src.height, src.width, src.height);
     const frame = camera.frame(alpha, this.gbuffer.width, this.gbuffer.height);
     this.lastCamera = frame;
     this.updateCameraWater(frame, time);
@@ -423,10 +434,27 @@ export class Renderer {
     return this.chains.gbuffer;
   }
 
+  /** This frame's render scale (debug panel). */
+  get renderScale(): number {
+    return this.currentScale();
+  }
+
+  /** This frame's render scale: the controller's, or the fixed one. */
+  private currentScale(): number {
+    const d = config.render.dynamic;
+    return d.enabled ? this.dynamic.scale : Math.min(config.render.renderScale, this.allocScale);
+  }
+
+  /** Scale the internal targets are allocated at: the largest the dynamic range (or the
+   *  fixed scale) can reach — changing the scale within it reallocates nothing. */
+  private allocScale = 0;
+
   private resizeTargets(): void {
     this.resolutionDirty = false;
     const maxDim = this.gpu.device.limits.maxTextureDimension2D;
-    const scale = config.render.renderScale;
+    const d = config.render.dynamic;
+    const scale = Math.max(config.render.renderScale, d.maxScale);
+    this.allocScale = scale;
     const w = Math.max(1, Math.min(Math.round(this.size.width * scale), maxDim));
     const h = Math.max(1, Math.min(Math.round(this.size.height * scale), maxDim));
 

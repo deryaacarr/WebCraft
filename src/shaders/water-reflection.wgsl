@@ -121,12 +121,13 @@ fn screenRadiance(rel: vec3f, face: u32, id: u32) -> vec4f {
   if (any(prev_uv < vec2f(0.0)) || any(prev_uv >= vec2f(1.0))) {
     return vec4f(0.0);
   }
-  return vec4f(textureLoad(prev_lit, vec2i(prev_uv * vec2f(cam.size)), 0).rgb, 1.0);
+  return vec4f(textureLoad(prev_lit, min(vec2i(prev_uv * vec2f(cam.prev_size)), vec2i(cam.prev_size) - 1), 0).rgb, 1.0);
 }
 
 @compute @workgroup_size(WORKGROUP_X, WORKGROUP_Y, 1)
 fn main(@builtin(global_invocation_id) gid: vec3u) {
-  let size = textureDimensions(output);
+  // Active reflection grid (dynamic resolution renders into part of the targets).
+  let size = (cam.size + params.scale - 1u) / params.scale;
   if (any(gid.xy >= size)) {
     return;
   }
@@ -210,7 +211,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
 
 @compute @workgroup_size(WORKGROUP_X, WORKGROUP_Y, 1)
 fn temporal(@builtin(global_invocation_id) gid: vec3u) {
-  let size = vec2i(textureDimensions(accumulated));
+  let size = vec2i((cam.size + params.scale - 1u) / params.scale);
+  let prev_size = vec2i((cam.prev_size + params.scale - 1u) / params.scale);
   let p = vec2i(gid.xy);
   if (any(p >= size)) {
     return;
@@ -234,7 +236,7 @@ fn temporal(@builtin(global_invocation_id) gid: vec3u) {
   let prev_uv = (vec2f(full) + 0.5) / vec2f(cam.size) - textureLoad(gmotion, full, 0).xy;
   var result = c;
   if (all(prev_uv >= vec2f(0.0)) && all(prev_uv < vec2f(1.0))) {
-    let h = textureLoad(history, clamp(vec2i(prev_uv * vec2f(size)), vec2i(0), size - 1), 0);
+    let h = textureLoad(history, clamp(vec2i(prev_uv * vec2f(prev_size)), vec2i(0), prev_size - 1), 0);
     if (h.a >= 0.0) {
       result = mix(clamp(h, lo, hi), c, params.blend);
     }

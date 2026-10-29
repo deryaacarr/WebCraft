@@ -84,7 +84,8 @@ fn coarseDistance(dir: vec3f) -> f32 {
 
 @compute @workgroup_size(WORKGROUP_X, WORKGROUP_Y, 1)
 fn main(@builtin(global_invocation_id) gid: vec3u) {
-  let dims = textureDimensions(coarse);
+  // Tiles of the active region (dynamic resolution renders into part of the targets).
+  let dims = (cam.size + cam.prepass_tile - 1u) / cam.prepass_tile;
   if (any(gid.xy >= dims)) {
     return;
   }

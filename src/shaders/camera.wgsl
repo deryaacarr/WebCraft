@@ -25,6 +25,9 @@ struct Camera {
   prev_forward: vec3f,
   /// Increments every frame (noise seeds).
   frame_index: u32,
+  /// Last frame's active size (dynamic resolution): history pixels are laid out at it.
+  prev_size: vec2u,
+  _pad_prev: vec2u,
 };
 
 /// World position of a G-buffer pixel relative to the camera, from its linear depth.

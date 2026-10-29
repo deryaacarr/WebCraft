@@ -29,7 +29,11 @@ async function main(): Promise<void> {
 
   const overrides = parseUrlOverrides(location.search);
   if (overrides.view) config.debug.view = overrides.view;
-  if (overrides.renderScale) config.render.renderScale = overrides.renderScale;
+  // An explicit scale (measuring tools) fixes it: dynamic resolution off.
+  if (overrides.renderScale) {
+    config.render.renderScale = overrides.renderScale;
+    config.render.dynamic.enabled = false;
+  }
   if (overrides.cameraSpin !== undefined) config.debug.cameraSpin = overrides.cameraSpin;
   if (overrides.cameraFly !== undefined) config.debug.cameraFly = overrides.cameraFly;
   if (overrides.timeOfDay !== undefined) {
@@ -133,6 +137,7 @@ async function main(): Promise<void> {
     materialStats: () => materials.stats,
     onTextureResolution: (res) => materials.load(res),
     onSamplerChange: () => materials.createSampler(),
+    renderScale: () => renderer.renderScale,
     worldStats: () => {
       let dense = 0;
       let chunkBytes = 0;

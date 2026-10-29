@@ -115,7 +115,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let uv = (vec2f(gid.xy) + 0.5) / vec2f(cam.size);
   let prev_uv = uv - motion;
   if (all(prev_uv >= vec2f(0.0)) && all(prev_uv < vec2f(1.0))) {
-    let prev_px = vec2i(prev_uv * vec2f(cam.size));
+    // History pixels are at last frame's active size (dynamic resolution).
+    let prev_px = min(vec2i(prev_uv * vec2f(cam.prev_size)), vec2i(cam.prev_size) - 1);
     let h = textureLoad(history, prev_px, 0);
     let rel = viewRelativePosition(rayDir(cam.inv_view_proj, uv), cam.forward, depth);
     let expected = dot(rel + cam.prev_delta, cam.prev_forward);

@@ -75,6 +75,16 @@ export const config = {
      *  TAAU pass (or the blit with TAAU off). 0.4 on a Retina canvas ≈ 1152×640 primary
      *  rays (0.5 = 1440×800 was the setting before TAAU). */
     renderScale: 0.4,
+    /** Dynamic resolution (gpu/dynamic-resolution.ts): the scale follows the GPU frame time
+     *  towards `targetMs` within [minScale, maxScale]; the internal targets are allocated
+     *  once at maxScale and passes render into part of them (no reallocation, histories
+     *  kept). Off: `renderScale` fixed. URL `&scale=` turns it off. */
+    dynamic: {
+      enabled: true,
+      targetMs: 16,
+      minScale: 0.35,
+      maxScale: 0.6,
+    },
     /** Tone mapper for the lit view (ACES fit = the stage 7 reference look; AgX options). */
     tonemapper: 'aces' as 'agx' | 'agx-punchy' | 'aces',
     /** AgX punchy look, applied in AgX log space: contrast power and saturation. */

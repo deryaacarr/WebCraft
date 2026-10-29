@@ -139,7 +139,8 @@ fn prepare(@builtin(global_invocation_id) gid: vec3u) {
   let uv = (vec2f(q) + 0.5) / vec2f(params.full_size);
   let prev_uv = uv - textureLoad(gmotion, vec2i(q), 0).xy;
   if (all(prev_uv >= vec2f(0.0)) && all(prev_uv < vec2f(1.0))) {
-    let pp = clamp(vec2i(round(giGridCoord(prev_uv, params.full_size, params.scale))), vec2i(0), vec2i(params.half_size) - 1);
+    // Last frame's GI grid (dynamic resolution: its active size may differ).
+    let pp = clamp(vec2i(round(giGridCoord(prev_uv, params.prev_full_size, params.scale))), vec2i(0), vec2i(params.prev_half_size) - 1);
     let face = gbFace(g0.w);
     let expected_plane = dot(faceNormal(face), rel + cam.prev_delta);
     if (onPlane(textureLoad(prev_guide, pp, 0), face, expected_plane, params.plane_tolerance)) {

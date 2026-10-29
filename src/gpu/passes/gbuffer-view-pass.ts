@@ -63,7 +63,8 @@ export class GBufferViewPass implements RenderPass {
 
   execute(ctx: FrameContext): void {
     if (!this.output || !this.bindGroup) return;
-    const { width, height } = this.output;
+    // The active region (dynamic resolution renders into part of the targets).
+    const { width, height } = this.gbuffer;
     const f32 = new Float32Array(this.paramData);
     const u32 = new Uint32Array(this.paramData);
     const [sx, sy, sz] = config.debug.sunDirection;

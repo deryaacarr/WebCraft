@@ -123,7 +123,8 @@ fn sampleAt(q: vec2i, in_size: vec2i) -> vec4f {
 @compute @workgroup_size(WORKGROUP_X, WORKGROUP_Y, 1)
 fn main(@builtin(global_invocation_id) gid: vec3u) {
   let out_size = textureDimensions(history_out);
-  let in_size = vec2i(textureDimensions(color_in));
+  // Active internal region (dynamic resolution); every internal read stays inside it.
+  let in_size = vec2i(cam.size);
   resolve(gid.xy, out_size, in_size);
 }
 
@@ -181,7 +182,9 @@ fn resolve(gid: vec2u, out_size: vec2u, in_size: vec2i) {
     let q_uv = (vec2f(nearest) + 0.5) / vec2f(in_size);
     let rel = viewRelativePosition(rayDir(cam.inv_view_proj, q_uv), cam.forward, nearest_depth);
     let expected = dot(rel + cam.prev_delta, cam.prev_forward);
-    let prev_px = clamp(vec2i(prev_uv * vec2f(in_size)), vec2i(0), in_size - 1);
+    // Last frame's depth is at last frame's active size.
+    let prev_in = vec2i(cam.prev_size);
+    let prev_px = clamp(vec2i(prev_uv * vec2f(prev_in)), vec2i(0), prev_in - 1);
     let tolerance = params.depth_tolerance * max(expected, 1.0);
     let sky = nearest_depth >= cam.far * 0.999;
     var same = sky || abs(textureLoad(prev_depth, prev_px, 0).x - expected) <= tolerance;
@@ -189,7 +192,7 @@ fn resolve(gid: vec2u, out_size: vec2u, in_size: vec2i) {
     // there may hold the other side of the edge. The surface counts as seen if any pixel
     // of the 3×3 held it (rejecting there reset the history every frame: edges flickered).
     for (var k = 0; k < 9 && !same; k++) {
-      let t = clamp(prev_px + vec2i(k % 3 - 1, k / 3 - 1), vec2i(0), in_size - 1);
+      let t = clamp(prev_px + vec2i(k % 3 - 1, k / 3 - 1), vec2i(0), prev_in - 1);
       same = abs(textureLoad(prev_depth, t, 0).x - expected) <= tolerance;
     }
     if (same) {

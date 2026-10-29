@@ -101,7 +101,8 @@ fn temporal(@builtin(global_invocation_id) gid: vec3u) {
 
   // Reprojection: bilinear over the previous half-res grid, each tap validated.
   let uv = (vec2f(q) + 0.5) / vec2f(params.full_size);
-  let prev = giGridCoord(uv - motion, params.full_size, params.scale);
+  // Last frame's GI grid (its active size may differ: dynamic resolution).
+  let prev = giGridCoord(uv - motion, params.prev_full_size, params.scale);
   let base = vec2i(floor(prev));
   let f = prev - vec2f(base);
   // Last frame's plane coordinate of this point (camera moved by prev_delta).
@@ -114,7 +115,7 @@ fn temporal(@builtin(global_invocation_id) gid: vec3u) {
   for (var k = 0; k < 4; k++) {
     let o = vec2i(k & 1, k >> 1);
     let t = base + o;
-    if (!inHalf(t)) {
+    if (any(t < vec2i(0)) || any(t >= vec2i(params.prev_half_size))) {
       continue;
     }
     if (!onPlane(textureLoad(prev_guide, t, 0), face, expected_plane, params.plane_tolerance)) {

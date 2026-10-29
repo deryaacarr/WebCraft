@@ -50,7 +50,8 @@ struct LightingParams {
   flicker_scale: f32,
   /// GI grid divisor (GiParams.scale).
   gi_scale: f32,
-  _pad1: f32,
+  /// Water reflection grid divisor (water-reflection.wgsl).
+  reflection_scale: f32,
   _pad2: f32,
 };
 
@@ -121,7 +122,8 @@ fn giSum(a: GiSample, b: GiSample) -> GiSample {
 /// all surface pixels there — never a single pixel of another surface, which showed as
 /// bright streaks on thin staircase faces.
 fn giUpsample(px: vec2i, full: vec2u, depth: f32, face: u32) -> GiSample {
-  let half = vec2i(textureDimensions(gi_guide));
+  // Active GI grid (dynamic resolution renders into part of the targets).
+  let half = vec2i((cam.size + vec2u(u32(params.gi_scale)) - 1u) / u32(params.gi_scale));
   let plane_p = dot(faceNormal(face), pixelPosition(vec2u(px), full, depth));
   let tolerance = params.gi_plane_tolerance;
   let f = vec2f(px) / params.gi_scale;
@@ -207,8 +209,10 @@ fn waterInscatter(sigma_t: vec3f, k: f32, path: f32) -> vec3f {
 /// Upsampled water reflection at full-res pixel `px`: bilinear over the reduced-resolution
 /// texels around it that lie on water; a < 0 if none does.
 fn waterReflection(px: vec2i) -> vec4f {
-  let size = vec2i(textureDimensions(water_reflection));
-  let scale = f32(cam.size.x) / f32(size.x);
+  // Active reflection grid (dynamic resolution).
+  let rs = u32(params.reflection_scale);
+  let size = vec2i((cam.size + rs - 1u) / rs);
+  let scale = f32(rs);
   let c = (vec2f(px) + 0.5) / scale - 0.5;
   let base = vec2i(floor(c));
   let fr = c - vec2f(base);

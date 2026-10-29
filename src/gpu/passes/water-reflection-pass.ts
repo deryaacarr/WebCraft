@@ -110,7 +110,7 @@ export class WaterReflectionPass implements RenderPass {
     const g = this.gbuffer;
     if (!g.gbuffer0 || !g.depth || !g.motion || !g.water) return;
     if (Math.max(1, Math.round(config.water.reflectionScale)) !== this.scale) {
-      this.resize(g.width, g.height);
+      this.resize(g.allocWidth, g.allocHeight);
       this.onResize?.();
     }
     if (!this.raw || !this.temporalGroups) return;
@@ -157,7 +157,8 @@ export class WaterReflectionPass implements RenderPass {
     // Alpha testing and hit albedo: params, tables, albedo array, sampler, noise.
     pass.setBindGroup(2, this.materials.bindGroup(this.layouts.materials, [0, 1, 2, 3, 6, 10]));
     pass.setBindGroup(3, this.sky.bindGroup(this.layouts.sky));
-    const groups = [Math.ceil(this.raw.width / this.workgroup[0]), Math.ceil(this.raw.height / this.workgroup[1])] as const;
+    // The active grid (dynamic resolution renders into part of the targets).
+    const groups = [Math.ceil(Math.ceil(g.width / this.scale) / this.workgroup[0]), Math.ceil(Math.ceil(g.height / this.scale) / this.workgroup[1])] as const;
     pass.dispatchWorkgroups(...groups);
     this.cur = 1 - this.cur;
     pass.setPipeline(this.temporalPipeline);
